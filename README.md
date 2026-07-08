@@ -162,7 +162,7 @@ at all.
 
 | Field | Meaning |
 |---|---|
-| `rebootDelay` | Optional Go duration (e.g. `"10s"`) to wait before rebooting into the next segment. Omit for immediate |
+| `rebootDelay` | Optional Go duration (e.g. `"6m"`) to wait before rebooting into the next segment. Omit for immediate |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].dnsServer` / `.dnsCheck` | Resolver to query (IPv4), record expected to resolve |

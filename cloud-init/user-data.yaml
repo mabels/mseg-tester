@@ -104,7 +104,7 @@ write_files:
   - path: /etc/mseg-tester/config.yaml
     permissions: "0644"
     content: |
-      rebootDelay: "10s"
+      rebootDelay: "6m"
       segments:
         - name: "128"
           dnsServer: "192.168.128.5"

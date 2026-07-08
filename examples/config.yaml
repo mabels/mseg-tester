@@ -18,7 +18,7 @@
 # doc), so these checks double as an ongoing regression check for that,
 # not just IPv4/IPv6 parity.
 
-rebootDelay: "10s"   # wait this long after checks+update+report, before rebooting into the next segment. omit/"" for immediate.
+rebootDelay: "6m"   # wait this long after checks+update+report, before rebooting into the next segment. omit/"" for immediate.
 
 report:
   url: "http://192.168.129.88:9091/report"   # e.g. the k8s-hosted collector on the management segment
