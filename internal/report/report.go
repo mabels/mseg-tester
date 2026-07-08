@@ -1,6 +1,7 @@
-// Package report POSTs every accumulated <segment>.result.yaml to
-// config.Report.URL -- e.g. the user's own k8s-hosted collector on the
-// management segment (192.168.129.88), or a Prometheus Pushgateway.
+// Package report sends every accumulated <segment>.result.yaml
+// somewhere central, two ways (either or both, see config.Report):
+// Push POSTs a JSON array to a generic webhook URL; PushInflux (see
+// influx.go) writes line protocol straight into an InfluxDB v2 bucket.
 // Only ever attempted from bootstrap.Bootstrap's UpdateSegment, the one
 // segment with a route anywhere outside the segment under test -- same
 // reachability constraint as internal/selfupdate and internal/configsync.

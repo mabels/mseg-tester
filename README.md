@@ -111,10 +111,13 @@ happens, not just the final summary.
      source and replace itself if the result differs (`internal/selfupdate`
      — no GitHub release, no build pipeline, no asset to keep in sync);
    - if `config.yaml` sets `report.url`, POST every accumulated
-     `<segment>.result.yaml` there (`internal/report`).
+     `<segment>.result.yaml` there as JSON (`internal/report.Push`); if it
+     sets `report.influx`, write them straight into an InfluxDB v2 bucket
+     as line protocol instead/as well (`internal/report.PushInflux`).
+     Either, both, or neither may be set.
 
-   Every other segment skips both — there's nothing to reach the module
-   proxy/GitHub or the report target through.
+   Every other segment skips all of this — there's nothing to reach the
+   module proxy/GitHub or the report target(s) through.
 8. Write netplan for the *next* segment in the cycle, advance
    `active.yaml`, and reboot — **only** on `updateSegment`, first sleep
    `config.yaml`'s `rebootDelay` (if set); every other segment reboots
@@ -213,6 +216,7 @@ Which segment (if any) is this trunk's native/untagged VLAN is declared in
 | `checkAttempts` | Optional. How many times to run the WHOLE batch of checks before giving up — if ANY check fails, the whole batch (not just that check) is re-run. Stops as soon as one full attempt passes every check. Defaults to `3` if omitted |
 | `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait before re-running the whole batch after a failure. Defaults to `"10s"` if omitted |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
+| `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket` — see `internal/report.PushInflux` and `examples/config.yaml`'s comment on creating one |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether the segment becomes Proxmox `net0`'s `tag=` or `trunks=` — the single source of truth for "which segment is native" |
 | `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |

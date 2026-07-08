@@ -46,7 +46,19 @@ checkAttempts: 3       # how many times to try EACH check before giving up on it
 checkRetryDelay: "10s" # wait between attempts of the SAME check. defaults to "10s" if omitted.
 
 report:
-  url: "http://192.168.129.88:9091/report"   # e.g. the k8s-hosted collector on the management segment
+  # Writes straight into an existing InfluxDB v2 instance -- see
+  # internal/report.PushInflux. "url" is InfluxDB's own base URL, not a
+  # path you have to build yourself. "token" MUST be a write-only token
+  # scoped to ONLY this one bucket (`influx auth create --write-bucket
+  # <id>`) -- never the InfluxDB admin/all-access token. The placeholder
+  # below is not a real credential; replace it with your own before
+  # deploying (treat it with the same care as bootstrap.yaml's
+  # configToken -- this file ends up in plaintext on every VM).
+  influx:
+    url: "https://mam-influx.adviser.com"
+    org: "homeassistant"
+    bucket: "mseg-tester"
+    token: "REPLACE_WITH_A_WRITE_ONLY_TOKEN_SCOPED_TO_THIS_BUCKET"
 
 segments:
   - name: "128"

@@ -190,12 +190,23 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		return fmt.Errorf("saving result: %w", err)
 	}
 
-	if active.Segment == boot.UpdateSegment && cfg.Report != nil && cfg.Report.URL != "" {
-		if verbose {
-			log.Printf("run: pushing accumulated results to %s", cfg.Report.URL)
+	if active.Segment == boot.UpdateSegment && cfg.Report != nil {
+		if cfg.Report.URL != "" {
+			if verbose {
+				log.Printf("run: pushing accumulated results to %s", cfg.Report.URL)
+			}
+			if err := report.Push(cfg.Report.URL, boot.StateDir); err != nil {
+				log.Printf("mseg-tester: report push: %v", err)
+			}
 		}
-		if err := report.Push(cfg.Report.URL, boot.StateDir); err != nil {
-			log.Printf("mseg-tester: report push: %v", err)
+		if cfg.Report.Influx != nil {
+			if verbose {
+				log.Printf("run: pushing accumulated results to influxdb %s (org=%s bucket=%s)",
+					cfg.Report.Influx.URL, cfg.Report.Influx.Org, cfg.Report.Influx.Bucket)
+			}
+			if err := report.PushInflux(*cfg.Report.Influx, boot.StateDir); err != nil {
+				log.Printf("mseg-tester: influx report push: %v", err)
+			}
 		}
 	}
 

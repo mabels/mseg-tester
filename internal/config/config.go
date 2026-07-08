@@ -135,15 +135,41 @@ type Segment struct {
 	RoutingCheck6 string `yaml:"routingCheck6,omitempty"`
 }
 
+// InfluxReport optionally sends every accumulated result straight into an
+// InfluxDB v2 bucket via its line-protocol /api/v2/write API -- an
+// alternative to (or alongside) Report.URL's generic JSON webhook, handy
+// when there's already an InfluxDB instance collecting everything else
+// on the network and no separate collector is worth standing up just
+// for this. See internal/report.PushInflux.
+type InfluxReport struct {
+	// URL is the InfluxDB v2 base URL, e.g. "https://mam-influx.adviser.com"
+	// -- no trailing slash needed, "/api/v2/write" is appended automatically.
+	URL string `yaml:"url"`
+	// Org is the InfluxDB organization name, e.g. "homeassistant".
+	Org string `yaml:"org"`
+	// Bucket is the InfluxDB bucket name to write into.
+	Bucket string `yaml:"bucket"`
+	// Token is an API token scoped to WRITE-ONLY access on Bucket --
+	// create one with `influx auth create --write-bucket <bucket-id>`,
+	// never the InfluxDB admin/all-access token: this value lives in
+	// plaintext in config.yaml on every VM in the cycle, the same trust
+	// level as bootstrap.yaml's configToken, and a write-only,
+	// single-bucket token is all that's ever needed here.
+	Token string `yaml:"token"`
+}
+
 // Report is where (and how) to send accumulated results -- only ever
 // attempted while the active segment is bootstrap.Bootstrap.UpdateSegment
 // (the one segment that can reach anywhere outside the segment being
 // tested), same reachability constraint as self-update and config-sync.
 type Report struct {
 	// URL results are POSTed to, as a JSON array of state.Result -- e.g.
-	// a Prometheus Pushgateway, or any small webhook/collector willing
-	// to accept that shape. Empty disables reporting entirely.
-	URL string `yaml:"url"`
+	// any small webhook/collector willing to accept that shape. Optional
+	// -- empty skips this path (may be used alongside Influx below, or
+	// left empty if Influx is set and nothing else needs the raw JSON).
+	URL string `yaml:"url,omitempty"`
+	// Influx is OPTIONAL -- see InfluxReport. Nil skips it.
+	Influx *InfluxReport `yaml:"influx,omitempty"`
 }
 
 // Config is the content-level configuration fetched from the private repo
