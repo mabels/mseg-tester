@@ -1,0 +1,59 @@
+# Example config.yaml -- the real, content-level config (see
+# internal/config and internal/bootstrap's package docs for the full
+# split rationale). Two ways to get this file onto the VM:
+#
+#   1. EASY: cloud-init writes it directly (see cloud-init/user-data.yaml's
+#      plain config.yaml write_files entry, or -config-file on
+#      cmd/verify-mseg-tester) -- no repo, no token. Changing it means
+#      editing and re-provisioning.
+#   2. Set bootstrap.yaml's configRepo to a repo URL holding this same
+#      file -- it's then fetched/refreshed at runtime (internal/configsync)
+#      on every boot on updateSegment, and changing it is a commit, not a
+#      re-provision. Only needed once you actually want that.
+#
+# dnsServer6/routingCheck6 are optional -- see internal/config's doc
+# comments. Worth setting on a dual-stack network like this one: OVN here
+# can only ever deliver a SOLICITED router advertisement (its own
+# periodic RA is unconditionally dropped -- see internal/checks' package
+# doc), so these checks double as an ongoing regression check for that,
+# not just IPv4/IPv6 parity.
+
+rebootDelay: "10s"   # wait this long after checks+update+report, before rebooting into the next segment. omit/"" for immediate.
+
+report:
+  url: "http://192.168.129.88:9091/report"   # e.g. the k8s-hosted collector on the management segment
+
+segments:
+  - name: "128"
+    dnsServer: "192.168.128.5"
+    dnsServer6: "fd00:192:168:128::5"
+    dnsCheck: "proxmox.example."
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"
+
+  - name: "129"
+    dnsServer: "192.168.129.5"
+    dnsServer6: "fd00:192:168:129::5"
+    dnsCheck: "log-sink.example."
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"
+
+  - name: "130"
+    dnsServer: "192.168.130.5"
+    dnsServer6: "fd00:192:168:130::5"
+    dnsCheck: "sw-neighbor.example."
+    geoCheck:
+      url: "https://ifconfig.co/country"
+      expect: "Germany"        # mullvad-de exit
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"
+
+  - name: "131"
+    dnsServer: "192.168.131.5"
+    dnsServer6: "fd00:192:168:131::5"
+    dnsCheck: "sw-usa.example."
+    geoCheck:
+      url: "https://ifconfig.co/country"
+      expect: "United States"  # mullvad-us exit
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"

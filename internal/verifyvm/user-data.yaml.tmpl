@@ -1,0 +1,173 @@
+#cloud-config
+# Rendered by cmd/verify-mseg-tester -- do not hand-edit the uploaded
+# snippet, edit this template and re-run `verify-mseg-tester create`
+# instead.
+#
+# This is the same bootstrap the "real" deployment uses (see
+# cloud-init/user-data.yaml): fetch the mseg-tester binary from the public
+# software repo, run `mseg-tester deploy`, reboot into the first cycle.
+# The one addition here is SSH access for a human to inspect a disposable
+# verify VM -- the production cloud-init deliberately has no user/SSH
+# access at all.
+
+hostname: {{.Hostname}}
+
+package_update: true
+packages:
+  - ca-certificates
+  - golang-go
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    lock_passwd: {{if .SSHAuthorizedKey}}false{{else}}true{{end}}
+{{- if .SSHAuthorizedKey}}
+    ssh_authorized_keys:
+      - {{.SSHAuthorizedKey}}
+{{- end}}
+
+write_files:
+  # Initial netplan: the trunk NIC plus the update segment only -- same
+  # shape mseg-tester itself writes on every subsequent cycle (see
+  # internal/netplan.Write). This copy only matters for getting from
+  # cloud-init to that first `mseg-tester run`, which overwrites it
+  # wholesale.
+{{- if and .NativeSegment (eq .NativeSegment .UpdateSegment)}}
+  #
+  # UpdateSegment IS NativeSegment here -- its traffic arrives UNTAGGED
+  # directly on {{.TrunkIface}}, not on a VLAN sub-interface, so
+  # {{.TrunkIface}} is configured directly (see internal/netplan.Write's
+  # native branch).
+  - path: /etc/netplan/90-mseg-tester.yaml
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          {{.TrunkIface}}:
+            dhcp4: true
+            dhcp6: false
+            accept-ra: true
+            link-local: [ipv4, ipv6]
+{{- else}}
+  #
+  # "optional: true" on the trunk interface itself tells
+  # systemd-networkd-wait-online not to block boot waiting for IT
+  # specifically to become "routable" -- it never will, it's a pure VLAN
+  # carrier with no address of its own. Without this, boot can hang for a
+  # long time (observed: "no limit" on systemd-networkd-wait-online.service).
+  - path: /etc/netplan/90-mseg-tester.yaml
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          {{.TrunkIface}}:
+            dhcp4: false
+            dhcp6: false
+            optional: true
+        vlans:
+          {{.TrunkIface}}.{{.UpdateSegment}}:
+            id: {{.UpdateSegment}}
+            link: {{.TrunkIface}}
+            dhcp4: true
+            dhcp6: false
+            accept-ra: true
+            link-local: [ipv4, ipv6]
+{{- end}}
+
+  # Local, rare-to-change facts -- see internal/bootstrap. configRepo is
+  # optional: empty means "just use the plain config.yaml below," set
+  # means "fetch/refresh config.yaml from that private repo at runtime"
+  # (internal/configsync) -- see -config-file vs. -config-repo in
+  # cmd/verify-mseg-tester.
+  - path: /etc/mseg-tester/bootstrap.yaml
+    permissions: "0600"
+    content: |
+      trunkInterface: {{.TrunkIface}}
+      nativeSegment: "{{.NativeSegment}}"
+      updateSegment: "{{.UpdateSegment}}"
+      softwareRepo: "{{.SoftwareRepo}}"
+      softwareRef: "{{if .SoftwareRef}}{{.SoftwareRef}}{{else}}latest{{end}}"
+      configRepo: "{{.ConfigRepo}}"
+      configPath: "{{.ConfigPath}}"
+      configRef: "{{.ConfigRef}}"
+      configToken: "{{.ConfigToken}}"
+      stateDir: "/mseg-tester"
+      configLocalPath: "/etc/mseg-tester/config.yaml"
+{{- if .ConfigYAML}}
+
+  # Static config.yaml provided directly via -config-file -- no private
+  # repo or token needed. If configRepo above is also set, this is just
+  # the starting point until the first successful sync overwrites it.
+  - path: /etc/mseg-tester/config.yaml
+    permissions: "0644"
+    content: |
+{{indent .ConfigYAML "      "}}
+{{- end}}
+
+
+  # Builds straight from source via `go install` (no GitHub release, no
+  # build pipeline, no asset naming to keep in sync -- see
+  # internal/selfupdate's package doc) using softwareRepo/softwareRef
+  # read directly out of bootstrap.yaml above, so -module-ref (which just
+  # sets softwareRef) is the ONE place that needs to change to exercise
+  # an unreleased branch or commit -- no separate binary-hosting side
+  # channel needed ("test without gh"). Retries until it succeeds:
+  # cloud-init boots this VM before there's necessarily any guarantee
+  # network-online has fully settled.
+  - path: /usr/local/sbin/mseg-tester-bootstrap.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -e
+      export HOME="${HOME:-/root}"
+      bootstrap_yaml="/etc/mseg-tester/bootstrap.yaml"
+      software_repo=$(sed -n 's/^softwareRepo: *"\(.*\)"/\1/p' "$bootstrap_yaml")
+      software_ref=$(sed -n 's/^softwareRef: *"\(.*\)"/\1/p' "$bootstrap_yaml")
+      [ -n "$software_ref" ] || software_ref="latest"
+      module="github.com/${software_repo}/cmd/mseg-tester"
+      dest="/usr/local/bin/mseg-tester"
+      echo "mseg-tester-bootstrap: go install ${module}@${software_ref}" | systemd-cat -t mseg-tester-bootstrap
+
+      i=0
+      until GOBIN=/usr/local/bin go install "${module}@${software_ref}"; do
+        i=$((i + 1))
+        echo "mseg-tester-bootstrap: attempt $i failed, retrying in 30s" | systemd-cat -t mseg-tester-bootstrap
+        sleep 30
+      done
+      echo "mseg-tester-bootstrap: binary installed" | systemd-cat -t mseg-tester-bootstrap
+
+      echo "mseg-tester-bootstrap: running deploy" | systemd-cat -t mseg-tester-bootstrap
+      "$dest" deploy
+
+      echo "mseg-tester-bootstrap: deploy done, rebooting into first cycle" | systemd-cat -t mseg-tester-bootstrap
+      systemctl reboot
+
+  - path: /etc/systemd/system/mseg-tester-bootstrap.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=mseg-tester: one-time build+deploy (retries until `go install` succeeds)
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/usr/local/bin/mseg-tester
+
+      [Service]
+      Type=oneshot
+      Environment=HOME=/root
+      ExecStart=/usr/local/sbin/mseg-tester-bootstrap.sh
+      ExecStartPost=/usr/bin/systemctl disable mseg-tester-bootstrap.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - [mkdir, -p, /mseg-tester]
+  - [systemctl, enable, mseg-tester-bootstrap.service]
+
+power_state:
+  mode: reboot
+  message: "verify-mseg-tester: rebooting to start the first real cycle"
+  condition: true

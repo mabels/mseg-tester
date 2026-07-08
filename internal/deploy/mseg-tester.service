@@ -1,0 +1,16 @@
+[Unit]
+Description=mseg-tester: check the active segment, advance, reboot into the next
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# HOME is needed so a self-update's `go install` (see internal/selfupdate)
+# resolves GOCACHE/GOMODCACHE the same way every boot -- system units
+# don't reliably inherit a HOME env var otherwise.
+Environment=HOME=/root
+ExecStart=/usr/local/bin/mseg-tester run
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

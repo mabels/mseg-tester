@@ -1,0 +1,222 @@
+// Command verify-mseg-tester creates or destroys a disposable VM on any
+// SSH-reachable Proxmox host, to exercise mseg-tester's cloud-init +
+// binary end-to-end on real hardware rather than by inspection.
+//
+// Every setting -- the Proxmox host, VMID, storage, bridge, VLANs,
+// software/config repos, credentials -- is a command-line flag; nothing
+// here is specific to any one environment, since this tool is meant to
+// be published alongside mseg-tester itself and run against any Proxmox
+// host.
+//
+// `create` and `destroy` are dry-run by default: they print exactly the
+// remote commands they would run and make no connection to the Proxmox
+// host at all. Pass -yes to actually execute the plan.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/mabels/mseg-tester/internal/sshrun"
+	"github.com/mabels/mseg-tester/internal/verifyvm"
+)
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "create":
+		runCreate(os.Args[2:])
+	case "destroy":
+		runDestroy(os.Args[2:])
+	case "status":
+		runStatus(os.Args[2:])
+	case "-h", "--help", "help":
+		usage()
+	default:
+		fmt.Fprintf(os.Stderr, "verify-mseg-tester: unknown subcommand %q\n\n", os.Args[1])
+		usage()
+		os.Exit(2)
+	}
+}
+
+func usage() {
+	fmt.Fprint(os.Stderr, `verify-mseg-tester -- create or destroy a disposable VM on a Proxmox
+host to verify mseg-tester's cloud-init + binary end-to-end.
+
+Usage:
+  verify-mseg-tester create  -host <user@proxmox> -vmid <id> [flags...] [-yes]
+  verify-mseg-tester destroy -host <user@proxmox> -vmid <id> [-yes]
+  verify-mseg-tester status  -host <user@proxmox> -vmid <id>
+
+Without -yes, create/destroy only print the remote commands they would
+run and never connect to the Proxmox host. Run "verify-mseg-tester create
+-h" or "... destroy -h" for the full flag list.
+`)
+}
+
+func commonFlags(fs *flag.FlagSet, p *verifyvm.Params) {
+	fs.StringVar(&p.Host, "host", "", "SSH target for the Proxmox host, e.g. root@proxmox.example.com (required)")
+	fs.Func("ssh-opt", "extra ssh option, repeatable, e.g. -ssh-opt -p -ssh-opt 2222", func(v string) error {
+		p.SSHOpts = append(p.SSHOpts, v)
+		return nil
+	})
+	fs.IntVar(&p.VMID, "vmid", 0, "Proxmox VMID to use (required)")
+	fs.StringVar(&p.Name, "name", "verify-mseg-tester", "VM name/hostname")
+}
+
+func runCreate(args []string) {
+	var p verifyvm.Params
+	fs := flag.NewFlagSet("create", flag.ExitOnError)
+	commonFlags(fs, &p)
+
+	fs.StringVar(&p.Storage, "storage", "", "Proxmox storage ID for the VM disk (required)")
+	fs.StringVar(&p.Image, "image", "", "path to a cloud-init-ready disk image, ON the Proxmox host (required)")
+	fs.StringVar(&p.Bridge, "bridge", "", "Proxmox bridge name (required)")
+	trunkVLANs := fs.String("trunk-vlans", "", "comma-separated VLAN IDs to trunk, e.g. 128,129,130,131 (empty = untagged, every VLAN passes -- the bridge must already be VLAN-aware)")
+	fs.StringVar(&p.NativeSegment, "native-segment", "", "the one segment (if any) that's this trunk's native/untagged VLAN, e.g. 128 -- must also be in -trunk-vlans if that's non-empty. Leave empty if every segment is a normal tagged VLAN")
+	fs.IntVar(&p.Cores, "cores", 2, "vCPUs")
+	fs.IntVar(&p.MemoryMB, "memory", 1024, "memory in MB")
+	fs.StringVar(&p.DiskSize, "disk-size", "8G", "disk size after import, passed to `qm resize`")
+	fs.StringVar(&p.BIOS, "bios", "seabios", `"seabios" or "ovmf"`)
+	fs.BoolVar(&p.Onboot, "onboot", false, "start this VM automatically when the Proxmox host itself boots")
+	fs.BoolVar(&p.Start, "start", true, "start the VM once created")
+	fs.StringVar(&p.SnippetsStorage, "snippets-storage", "local", "storage ID that holds cloud-init snippets")
+	fs.StringVar(&p.SnippetsPath, "snippets-path", "/var/lib/vz/snippets", "filesystem path to that storage's snippets dir, ON the Proxmox host")
+
+	fs.StringVar(&p.TrunkIface, "trunk-iface", "ens18", "NIC name inside the guest")
+	fs.StringVar(&p.UpdateSegment, "update-segment", "", "the one VLAN/segment with internet access (required)")
+	fs.StringVar(&p.SoftwareRepo, "software-repo", "", "owner/repo (on github.com) `go install` builds mseg-tester from -- no release needed (required)")
+	configFile := fs.String("config-file", "", "path to a plain local config.yaml to deploy as-is -- no private repo or token needed (the easy path; see examples/config.yaml). Required unless -config-repo is set")
+	fs.StringVar(&p.ConfigRepo, "config-repo", "", "URL of a private (or public) repo to fetch/refresh config.yaml from at runtime instead, e.g. https://github.com/owner/repo. Required unless -config-file is set")
+	fs.StringVar(&p.ConfigPath, "config-path", "config.yaml", "path of config.yaml within config-repo")
+	fs.StringVar(&p.ConfigRef, "config-ref", "main", "branch/tag/commit to fetch config.yaml at")
+	configToken := fs.String("config-token", "", "config-repo's PAT, given directly, if it's private (prefer -config-token-file: this appears in argv/shell history/process list)")
+	configTokenFile := fs.String("config-token-file", "", "path to a local file containing the fine-grained PAT for config-repo, if it's private")
+	sshKeyFile := fs.String("ssh-key-file", "", "path to a local SSH public key file to authorize for the 'ubuntu' user (recommended, for inspecting the VM)")
+	fs.StringVar(&p.SoftwareRef, "module-ref", "", "git branch/tag/commit the bootstrap script's `go install` (and every later self-update) builds -software-repo from. Defaults to \"latest\" (the newest semver tag). Point at your own branch or a commit SHA to exercise unreleased code -- no GitHub release or build pipeline needed (\"test without gh\")")
+
+	yes := fs.Bool("yes", false, "actually connect to the Proxmox host and run these commands (default: print the plan only)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+
+	if *trunkVLANs != "" {
+		for _, v := range strings.Split(*trunkVLANs, ",") {
+			p.TrunkVLANs = append(p.TrunkVLANs, strings.TrimSpace(v))
+		}
+	}
+
+	p.ConfigToken = *configToken
+	if *configTokenFile != "" {
+		b, err := os.ReadFile(*configTokenFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: reading -config-token-file: %v", err)
+		}
+		p.ConfigToken = strings.TrimSpace(string(b))
+	}
+	if *configFile != "" {
+		b, err := os.ReadFile(*configFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: reading -config-file: %v", err)
+		}
+		p.ConfigYAML = string(b)
+	}
+	if *sshKeyFile != "" {
+		b, err := os.ReadFile(*sshKeyFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: reading -ssh-key-file: %v", err)
+		}
+		p.SSHAuthorizedKey = strings.TrimSpace(string(b))
+	}
+	if err := p.ValidateCreate(); err != nil {
+		log.Fatalf("verify-mseg-tester: %v", err)
+	}
+
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		log.Fatalf("verify-mseg-tester: %v", err)
+	}
+	runPlan(p, steps, *yes)
+}
+
+func runDestroy(args []string) {
+	var p verifyvm.Params
+	fs := flag.NewFlagSet("destroy", flag.ExitOnError)
+	commonFlags(fs, &p)
+	fs.StringVar(&p.SnippetsPath, "snippets-path", "/var/lib/vz/snippets", "filesystem path to the snippets dir, ON the Proxmox host (must match what create used)")
+	fs.BoolVar(&p.KeepSnippets, "keep-snippets", false, "don't remove the cloud-init snippet files create uploaded")
+	yes := fs.Bool("yes", false, "actually connect to the Proxmox host and run these commands (default: print the plan only)")
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+
+	if err := p.ValidateCommon(); err != nil {
+		log.Fatalf("verify-mseg-tester: %v", err)
+	}
+	runPlan(p, p.BuildDestroyPlan(), *yes)
+}
+
+func runStatus(args []string) {
+	var p verifyvm.Params
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	commonFlags(fs, &p)
+	if err := fs.Parse(args); err != nil {
+		os.Exit(2)
+	}
+
+	if err := p.ValidateCommon(); err != nil {
+		log.Fatalf("verify-mseg-tester: %v", err)
+	}
+	// Read-only -- runs unconditionally, no -yes gate needed.
+	runner := sshrun.New(p.Host, p.SSHOpts)
+	for _, step := range p.BuildStatusPlan() {
+		out, err := runner.Run(step.Command, step.Stdin)
+		fmt.Printf("== %s ==\n%s\n", step.Description, out)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: %v", err)
+		}
+	}
+}
+
+func runPlan(p verifyvm.Params, steps []verifyvm.Step, yes bool) {
+	fmt.Printf("Plan for VM %d (%s) on %s:\n\n", p.VMID, p.Name, p.Host)
+	for i, step := range steps {
+		fmt.Printf("%2d. %s\n", i+1, step.Description)
+		if step.Command != "" {
+			fmt.Printf("    ssh %s %s\n", p.Host, step.Command)
+		}
+	}
+	fmt.Println()
+
+	if !yes {
+		fmt.Println("Dry run only -- no connection made. Re-run with -yes to apply.")
+		return
+	}
+
+	runner := sshrun.New(p.Host, p.SSHOpts)
+	for i, step := range steps {
+		fmt.Printf("--> [%d/%d] %s\n", i+1, len(steps), step.Description)
+		var (
+			out string
+			err error
+		)
+		if step.Action != nil {
+			err = step.Action(runner)
+		} else {
+			out, err = runner.Run(step.Command, step.Stdin)
+		}
+		if out != "" {
+			fmt.Println(out)
+		}
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: step %d (%s) failed: %v", i+1, step.Description, err)
+		}
+	}
+	fmt.Println("Done.")
+}

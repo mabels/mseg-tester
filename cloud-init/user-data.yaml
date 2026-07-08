@@ -1,0 +1,222 @@
+#cloud-config
+# mseg-tester first-boot provisioning.
+#
+# Prerequisite (one-time, manual, in Proxmox -- NOT automated, and
+# deliberately so -- see the whole point of this tool's design): this
+# VM's one virtual NIC must be a TRUNK port carrying every segment's
+# 802.1Q VLAN tag (128/129/130/131). Nothing after this file ever touches
+# Proxmox again -- every subsequent network change is this VM rewriting
+# its own netplan config and rebooting into it.
+#
+# Replace TRUNK_IFACE below with whatever this VM's guest NIC is actually
+# named (commonly ens18 on Proxmox's default virtio model -- check with
+# `ip link` on first boot if unsure, then fix this file and re-provision).
+#
+# First boot brings up segment 129 (the management segment) directly --
+# that's the one segment with a real route to the internet/GitHub, and
+# mseg-tester's own cycle always starts wherever cloud-init left it.
+
+hostname: mseg-tester
+
+package_update: true
+packages:
+  - ca-certificates
+  - golang-go
+
+write_files:
+  # Initial netplan: segment 129 only, same shape mseg-tester itself
+  # writes on every subsequent cycle (see internal/netplan) -- this file
+  # gets wholesale-overwritten by the binary from its first run onward,
+  # this copy only matters for getting from cloud-init to that first run.
+  #
+  # "optional: true" on the trunk interface itself tells
+  # systemd-networkd-wait-online not to block boot waiting for IT
+  # specifically to become "routable" -- it never will, it's a pure VLAN
+  # carrier with no address of its own. Without this, boot can hang for a
+  # long time (observed: "no limit" on systemd-networkd-wait-online.service).
+  #
+  # NOTE: this block assumes updateSegment (129 below) is a normal TAGGED
+  # VLAN, not this trunk's native/untagged segment. If you set
+  # bootstrap.yaml's nativeSegment below to the SAME value as
+  # updateSegment, this initial netplan needs to change shape too --
+  # configure TRUNK_IFACE directly (dhcp4: true, no vlans stanza, no
+  # "optional") instead, the same way internal/netplan.Write's native
+  # branch does. Not needed for the default 128=native/129=updateSegment
+  # split.
+  - path: /etc/netplan/90-mseg-tester.yaml
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        ethernets:
+          TRUNK_IFACE:
+            dhcp4: false
+            dhcp6: false
+            optional: true
+        vlans:
+          TRUNK_IFACE.129:
+            id: 129
+            link: TRUNK_IFACE
+            dhcp4: true
+            dhcp6: false
+            accept-ra: true
+            link-local: [ipv4, ipv6]
+
+  # Local, rare-to-change facts -- see internal/bootstrap.
+  #
+  # Two ways to provide the real, content-level config.yaml (segment
+  # list, test targets, timing, report target) -- pick ONE:
+  #
+  #   1. EASY (the default below): leave configRepo empty and just fill
+  #      in the plain /etc/mseg-tester/config.yaml write_files entry
+  #      further down. No private repo, no token, nothing fetched at
+  #      runtime -- changing it means editing this file and
+  #      re-provisioning the VM, which is fine to start with.
+  #   2. Set configRepo to a private repo's URL (e.g.
+  #      https://github.com/owner/repo) and configToken to a
+  #      fine-grained, read-only, repo-scoped GitHub PAT -- config.yaml
+  #      is then fetched and refreshed at runtime (internal/configsync)
+  #      on every boot on updateSegment, and changing it is a commit,
+  #      not a VM re-provision. Treat configToken with the same care as
+  #      any other credential-bearing file.
+  - path: /etc/mseg-tester/bootstrap.yaml
+    permissions: "0600"
+    content: |
+      trunkInterface: TRUNK_IFACE
+      nativeSegment: "128"  # segment 128 arrives UNTAGGED on TRUNK_IFACE itself -- it is NOT a VLAN sub-interface. Leave empty if every segment is a normal tagged VLAN.
+      updateSegment: "129"
+      softwareRepo: "mabels/mseg-tester"
+      softwareRef: "latest"  # git branch/tag/commit `go install` fetches -- "latest" means the newest semver tag
+      configRepo: ""      # optional: set to a URL to fetch config.yaml from a private repo instead
+      configPath: "config.yaml"
+      configRef: "main"
+      configToken: ""     # only needed if configRepo is set and private
+      stateDir: "/mseg-tester"
+      configLocalPath: "/etc/mseg-tester/config.yaml"
+
+  # The plain config.yaml used when configRepo above is left empty (the
+  # default/easy path) -- see examples/config.yaml for the same shape
+  # with more commentary. Fill in real dnsCheck/routingCheck/geoCheck
+  # targets per segment; these are placeholders. If you DO set
+  # configRepo, this file is still what's used until the first
+  # successful sync overwrites it -- harmless to leave in place either
+  # way.
+  - path: /etc/mseg-tester/config.yaml
+    permissions: "0644"
+    content: |
+      rebootDelay: "10s"
+      segments:
+        - name: "128"
+          dnsServer: "192.168.128.5"
+          dnsServer6: "fd00:192:168:128::5"
+          dnsCheck: "proxmox.example."   # replace: a real record in this segment's zone
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
+        - name: "129"
+          dnsServer: "192.168.129.5"
+          dnsServer6: "fd00:192:168:129::5"
+          dnsCheck: "log-sink.example." # replace
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
+        - name: "130"
+          dnsServer: "192.168.130.5"
+          dnsServer6: "fd00:192:168:130::5"
+          dnsCheck: "sw-neighbor.example."         # replace
+          geoCheck:
+            url: "https://ifconfig.co/country"
+            expect: "Germany"                      # mullvad-de exit
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
+        - name: "131"
+          dnsServer: "192.168.131.5"
+          dnsServer6: "fd00:192:168:131::5"
+          dnsCheck: "sw-usa.example."               # replace
+          geoCheck:
+            url: "https://ifconfig.co/country"
+            expect: "United States"                # mullvad-us exit
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
+
+  # The actual build-and-install logic runs as a real shell script (not
+  # inline `runcmd` entries) purely so it can retry in a loop -- cloud-init
+  # boots this VM before there's necessarily any guarantee network-online
+  # has fully settled. Retrying beats a `runcmd` entry that runs once,
+  # fails, and leaves the box stuck with no binary.
+  #
+  # Builds straight from source via `go install` (no GitHub release, no
+  # build pipeline, no asset to keep in sync -- see internal/selfupdate's
+  # package doc) using softwareRepo/softwareRef read directly out of
+  # bootstrap.yaml above, so there's exactly one place those two values
+  # live. This script only ever needs to run ONCE, ever: it builds the
+  # binary, then hands off to `mseg-tester deploy` (which installs the
+  # systemd unit), then reboots into the first real cycle. config.yaml is
+  # already in place from the write_files entry above (or, if
+  # bootstrap.yaml's configRepo is set, gets synced by the running
+  # binary itself on the first `run` -- internal/configsync, gated on
+  # being on updateSegment) -- this script never needs to fetch it.
+  - path: /usr/local/sbin/mseg-tester-bootstrap.sh
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      set -e
+      export HOME="${HOME:-/root}"
+      bootstrap_yaml="/etc/mseg-tester/bootstrap.yaml"
+      software_repo=$(sed -n 's/^softwareRepo: *"\(.*\)"/\1/p' "$bootstrap_yaml")
+      software_ref=$(sed -n 's/^softwareRef: *"\(.*\)"/\1/p' "$bootstrap_yaml")
+      [ -n "$software_ref" ] || software_ref="latest"
+      module="github.com/${software_repo}/cmd/mseg-tester"
+      dest="/usr/local/bin/mseg-tester"
+      echo "mseg-tester-bootstrap: go install ${module}@${software_ref}" | systemd-cat -t mseg-tester-bootstrap
+
+      i=0
+      until GOBIN=/usr/local/bin go install "${module}@${software_ref}"; do
+        i=$((i + 1))
+        echo "mseg-tester-bootstrap: attempt $i failed, retrying in 30s" | systemd-cat -t mseg-tester-bootstrap
+        sleep 30
+      done
+      echo "mseg-tester-bootstrap: binary installed" | systemd-cat -t mseg-tester-bootstrap
+
+      # Deploy installs the systemd unit; the unit's own first `run` will
+      # perform its own config-sync (since it boots straight onto
+      # updateSegment) -- but doing one explicit sync-config pass here
+      # too means a genuinely empty first boot doesn't have to wait for
+      # that first `run` to discover the private repo is unreachable.
+      echo "mseg-tester-bootstrap: running deploy" | systemd-cat -t mseg-tester-bootstrap
+      "$dest" deploy
+
+      echo "mseg-tester-bootstrap: deploy done, rebooting into first cycle" | systemd-cat -t mseg-tester-bootstrap
+      systemctl reboot
+
+  # Runs once, at boot, as its own unit rather than a cloud-init `runcmd`
+  # entry -- so the retry loop above can genuinely block/sleep across
+  # however many attempts it takes without cloud-init's own timeout
+  # semantics getting involved. Disables itself after running: once
+  # mseg-tester is deployed, ITS OWN unit (installed by `deploy`, see
+  # internal/deploy) is what runs on every subsequent boot -- this
+  # bootstrap unit's job is done after the first successful build.
+  - path: /etc/systemd/system/mseg-tester-bootstrap.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=mseg-tester: one-time build+deploy (retries until `go install` succeeds)
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=!/usr/local/bin/mseg-tester
+
+      [Service]
+      Type=oneshot
+      Environment=HOME=/root
+      ExecStart=/usr/local/sbin/mseg-tester-bootstrap.sh
+      ExecStartPost=/usr/bin/systemctl disable mseg-tester-bootstrap.service
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - [mkdir, -p, /mseg-tester]
+  - [systemctl, enable, mseg-tester-bootstrap.service]
+
+power_state:
+  mode: reboot
+  message: "mseg-tester: rebooting to start the fetch+deploy bootstrap"
+  condition: true
