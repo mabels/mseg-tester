@@ -118,6 +118,18 @@ write_files:
     content: |
 {{indent .ConfigYAML "      "}}
 {{- end}}
+{{- if .EnvFile}}
+
+  # Local-only secrets (KEY=VALUE, see internal/envfile) -- resolves any
+  # "${VAR}" reference in config.yaml above (e.g. report.influx.token) at
+  # runtime, without that secret ever appearing in config.yaml itself.
+  # 0600, never fetched from configRepo, never synced anywhere -- see
+  # bootstrap.Bootstrap.EnvFile.
+  - path: /etc/mseg-tester/.env
+    permissions: "0600"
+    content: |
+{{indent .EnvFile "      "}}
+{{- end}}
 
 
   # Builds straight from source via `go install` (no GitHub release, no

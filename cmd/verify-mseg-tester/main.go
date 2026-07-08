@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/mabels/mseg-tester/internal/config"
+	"github.com/mabels/mseg-tester/internal/envfile"
 	"github.com/mabels/mseg-tester/internal/sshrun"
 	"github.com/mabels/mseg-tester/internal/verifyvm"
 )
@@ -97,10 +98,11 @@ func runCreate(args []string) {
 	fs.StringVar(&p.ConfigRef, "config-ref", "main", "branch/tag/commit to fetch config.yaml at")
 	configToken := fs.String("config-token", "", "config-repo's PAT, given directly, if it's private (prefer -config-token-file: this appears in argv/shell history/process list)")
 	configTokenFile := fs.String("config-token-file", "", "path to a local file containing the fine-grained PAT for config-repo, if it's private")
+	envFile := fs.String("env-file", "", "path to a local .env file (KEY=VALUE, see internal/envfile) to deploy to /etc/mseg-tester/.env on the guest, 0600 -- this is what lets -config-file's \"${VAR}\" references (e.g. report.influx.token) actually resolve at runtime, instead of needing a manual copy onto the VM. Optional; never fetched from -config-repo")
 	sshKeyFile := fs.String("ssh-key-file", "", "path to a local SSH public key file to authorize for the 'ubuntu' user (recommended, for inspecting the VM)")
 	fs.StringVar(&p.SoftwareRef, "module-ref", "", "git branch/tag/commit the bootstrap script's `go install` (and every later self-update) builds -software-repo from. Defaults to \"latest\" (the newest semver tag). Point at your own branch or a commit SHA to exercise unreleased code -- no GitHub release or build pipeline needed (\"test without gh\")")
-	consolePassword := fs.String("console-password", "", "plaintext password for the 'ubuntu' user, for logging in on Proxmox's serial/VNC console independent of SSH (prefer -console-password-file: this appears in argv/shell history/process list). Leave empty to leave the account password-locked -- SSH via -ssh-key-file is unaffected either way")
-	consolePasswordFile := fs.String("console-password-file", "", "path to a local file containing the plaintext console password")
+	consolePassword := fs.String("console-password", "", "plaintext password for the 'ubuntu' user, for logging in on Proxmox's serial/VNC console independent of SSH (prefer -console-password-file, or a CONSOLE_PASSWORD entry in -env-file: this flag appears in argv/shell history/process list). Leave everything unset to leave the account password-locked -- SSH via -ssh-key-file is unaffected either way")
+	consolePasswordFile := fs.String("console-password-file", "", "path to a local file containing the plaintext console password. If neither this nor -console-password is set, falls back to a CONSOLE_PASSWORD entry in -env-file")
 
 	yes := fs.Bool("yes", false, "actually connect to the Proxmox host and run these commands (default: print the plan only)")
 	if err := fs.Parse(args); err != nil {
@@ -115,6 +117,19 @@ func runCreate(args []string) {
 		}
 		p.ConfigToken = strings.TrimSpace(string(b))
 	}
+	var envVars map[string]string
+	if *envFile != "" {
+		b, err := os.ReadFile(*envFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: reading -env-file: %v", err)
+		}
+		p.EnvFile = string(b)
+
+		envVars, err = envfile.Load(*envFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: parsing -env-file: %v", err)
+		}
+	}
 	if *configFile != "" {
 		b, err := os.ReadFile(*configFile)
 		if err != nil {
@@ -126,11 +141,14 @@ func runCreate(args []string) {
 		// itself (config.Segment.Type/IfName) rather than separate
 		// -trunk-vlans/-native-segment flags -- one source of truth,
 		// nothing to keep in sync by hand. See internal/config's package
-		// doc and internal/netplan.IfaceName. No .env file to load here --
-		// nil still lets any "${VAR}" reference (e.g. report.influx.token)
-		// fall back to this shell's own environment, same as
-		// config.Load's doc comment describes.
-		parsedCfg, err := config.Load(*configFile, nil)
+		// doc and internal/netplan.IfaceName. envVars (from -env-file, if
+		// given) is passed here too so this validation parse resolves
+		// "${VAR}" references (e.g. report.influx.token) exactly the same
+		// way the deployed VM's own mseg-tester run eventually will --
+		// still falls back to this shell's own environment when envVars is
+		// nil (no -env-file given), same as config.Load's doc comment
+		// describes.
+		parsedCfg, err := config.Load(*configFile, envVars)
 		if err != nil {
 			log.Fatalf("verify-mseg-tester: parsing -config-file: %v", err)
 		}
@@ -153,6 +171,14 @@ func runCreate(args []string) {
 			log.Fatalf("verify-mseg-tester: reading -console-password-file: %v", err)
 		}
 		p.ConsolePassword = strings.TrimSpace(string(b))
+	} else if p.ConsolePassword == "" {
+		// Neither -console-password nor -console-password-file given --
+		// fall back to CONSOLE_PASSWORD in -env-file, if present, so the
+		// one local .env file can hold this secret too instead of needing
+		// yet another -console-password-file passed on the command line.
+		if v, ok := envVars["CONSOLE_PASSWORD"]; ok {
+			p.ConsolePassword = v
+		}
 	}
 	if err := p.ValidateCreate(); err != nil {
 		log.Fatalf("verify-mseg-tester: %v", err)

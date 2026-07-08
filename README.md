@@ -189,6 +189,7 @@ at all.
 |---|---|---|
 | `mseg-tester deploy` | Once, from the cloud-init bootstrap script, after the binary is first downloaded | Copies itself to `/usr/local/bin`, writes and enables the systemd unit (`internal/deploy`) |
 | `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/etc/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
+| `mseg-tester render-netplan -config path -segment name [-trunk-iface name]` | Whenever you want to eyeball a segment's netplan | Prints exactly what `internal/netplan.Write` would install for that segment, from a local `config.yaml` — no VM, no network, no shell-on-the-box needed. Handy when a box is stuck at boot (e.g. `systemd-networkd-wait-online`) and unreachable: run this locally against the same `config.yaml` instead |
 
 ## `bootstrap.yaml` reference (`/etc/mseg-tester/bootstrap.yaml`)
 
@@ -272,6 +273,7 @@ go run ./cmd/verify-mseg-tester create \
   -update-segment 129 \
   -software-repo mabels/mseg-tester \
   -config-file ./examples/config.yaml \
+  -env-file ./.env \
   -ssh-key-file ~/.ssh/id_ed25519.pub
 # prints the plan; re-run with -yes to actually create the VM
 
@@ -317,13 +319,25 @@ Notes:
 - `-console-password` (or `-console-password-file`, preferred) sets a
   plaintext password for the `ubuntu` user, for logging in on Proxmox's
   serial/VNC console independent of SSH — useful before SSH is even up,
-  or if you skipped `-ssh-key-file`. Leave both unset to keep the account
-  password-locked. This does **not** enable SSH password auth; SSH still
-  requires `-ssh-key-file`'s key either way.
+  or if you skipped `-ssh-key-file`. If neither is given, a `CONSOLE_PASSWORD`
+  entry in `-env-file` is used instead, if present — so the one local
+  `.env` file can hold this alongside e.g. `INFLUX_TOKEN` without a
+  separate `-console-password-file` to pass. Leave all three unset to
+  keep the account password-locked. This does **not** enable SSH password
+  auth; SSH still requires `-ssh-key-file`'s key either way.
 - `-config-token-file` (not `-config-token`) is the safe way to pass a
   private repo's PAT — the direct flag form ends up in shell history and
   `ps` output. The same reasoning applies to `-console-password-file`
   over `-console-password`.
+- `-env-file` (optional) deploys a local `.env` file (`KEY=VALUE`, see
+  `internal/envfile`) to `/etc/mseg-tester/.env` on the guest, `0600`.
+  This is what actually resolves `config.yaml`'s `"${VAR}"` references
+  (e.g. `report.influx.token`) at runtime — without it, those references
+  are only ever resolved from the shell's own environment when
+  `mseg-tester run` happens to have one (normally it won't, running under
+  systemd), so the placeholder stays literal. Never fetched from
+  `-config-repo` or synced anywhere — like `bootstrap.yaml` itself, it's
+  local-only and provisioned once, by hand, per VM.
 
 ## License
 

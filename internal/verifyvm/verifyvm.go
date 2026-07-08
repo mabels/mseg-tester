@@ -97,6 +97,16 @@ type Params struct {
 	// just the starting point until the first sync from ConfigRepo
 	// overwrites it.
 	ConfigYAML string
+	// EnvFile is OPTIONAL -- the raw content of a local ".env" file
+	// (KEY=VALUE, see internal/envfile) to write directly to
+	// /etc/mseg-tester/.env at deploy time, 0600. This is what actually
+	// lets ConfigYAML's "${VAR}" references (e.g. report.influx.token)
+	// resolve at runtime -- bootstrap.Bootstrap.EnvFile's doc comment
+	// already documents this file as "written once by cloud-init"; this
+	// field is what makes that true. Never fetched from ConfigRepo or any
+	// other repo -- like bootstrap.yaml itself, this is local-only and
+	// provisioned once, by hand, per VM.
+	EnvFile string
 	// SoftwareRef is OPTIONAL -- the git branch/tag/commit the bootstrap
 	// script's `go install` (and every later self-update,
 	// internal/selfupdate) builds from. Defaults to "latest" (the newest
@@ -156,6 +166,7 @@ func (p Params) RenderUserData() ([]byte, error) {
 		ConfigToken      string
 		SSHAuthorizedKey string
 		ConfigYAML       string
+		EnvFile          string
 		ConsolePassword  string
 	}{
 		Hostname:         p.Name,
@@ -170,6 +181,7 @@ func (p Params) RenderUserData() ([]byte, error) {
 		ConfigToken:      p.ConfigToken,
 		SSHAuthorizedKey: p.SSHAuthorizedKey,
 		ConfigYAML:       p.ConfigYAML,
+		EnvFile:          p.EnvFile,
 		ConsolePassword:  p.ConsolePassword,
 	}
 	var buf bytes.Buffer

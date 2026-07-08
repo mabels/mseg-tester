@@ -80,6 +80,40 @@ func TestRenderUserDataWithConfigYAML(t *testing.T) {
 	assertValidYAML(t, out)
 }
 
+func TestRenderUserDataWithoutEnvFile(t *testing.T) {
+	p := Params{Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129", SoftwareRepo: "mabels/mseg-tester"}
+	out, err := p.RenderUserData()
+	if err != nil {
+		t.Fatalf("RenderUserData: %v", err)
+	}
+	if strings.Contains(string(out), "- path: /etc/mseg-tester/.env") {
+		t.Errorf("expected no .env write_files entry when EnvFile is empty, got:\n%s", out)
+	}
+	assertValidYAML(t, out)
+}
+
+func TestRenderUserDataWithEnvFile(t *testing.T) {
+	p := Params{
+		Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129",
+		SoftwareRepo: "mabels/mseg-tester", EnvFile: "INFLUX_TOKEN=secret-value\n",
+	}
+	out, err := p.RenderUserData()
+	if err != nil {
+		t.Fatalf("RenderUserData: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "- path: /etc/mseg-tester/.env") {
+		t.Errorf("expected a .env write_files entry, got:\n%s", s)
+	}
+	if !strings.Contains(s, `permissions: "0600"`) {
+		t.Errorf("expected the .env entry to be 0600, got:\n%s", s)
+	}
+	if !strings.Contains(s, "      INFLUX_TOKEN=secret-value") {
+		t.Errorf("expected .env content indented to 6 spaces, got:\n%s", s)
+	}
+	assertValidYAML(t, out)
+}
+
 func TestRenderUserDataNativeSegmentIsUpdateSegment(t *testing.T) {
 	p := Params{
 		Name: "verify-mseg-tester", TrunkIface: "ens18",

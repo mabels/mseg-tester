@@ -1,7 +1,11 @@
 // Command mseg-tester is a single self-contained binary meant to run once
 // per boot on a small, otherwise-unremarkable Ubuntu Server VM whose one
-// NIC is trunked with every segment's VLAN tag. Two subcommands:
+// NIC is trunked with every segment's VLAN tag. Subcommands:
 //
+//	mseg-tester render-netplan -- offline debug helper: prints exactly what
+//	                        internal/netplan.Write would install for one
+//	                        segment, from a local config.yaml, no VM or
+//	                        network access needed at all. See renderNetplanCmd.
 //	mseg-tester deploy   -- one-time (and idempotent-to-repeat) install:
 //	                        copy this executable to /usr/local/bin, write
 //	                        and enable the systemd unit. See internal/deploy.
@@ -71,7 +75,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("mseg-tester: expected a subcommand: \"deploy\" or \"run\"")
+		log.Fatalf("mseg-tester: expected a subcommand: \"deploy\", \"run\", or \"render-netplan\"")
 	}
 	subcommand := os.Args[1]
 	args := os.Args[2:]
@@ -83,9 +87,37 @@ func main() {
 		}
 	case "run":
 		runCmd(args)
+	case "render-netplan":
+		renderNetplanCmd(args)
 	default:
-		log.Fatalf("mseg-tester: unknown subcommand %q -- expected \"deploy\" or \"run\"", subcommand)
+		log.Fatalf("mseg-tester: unknown subcommand %q -- expected \"deploy\", \"run\", or \"render-netplan\"", subcommand)
 	}
+}
+
+// renderNetplanCmd prints exactly what internal/netplan.Write would install
+// for one segment, without touching disk or needing to be run on a real
+// VM at all -- lets a stuck/hung box's netplan be inspected offline from a
+// local config.yaml, e.g. while the VM itself is unreachable (no lease yet,
+// stuck at systemd-networkd-wait-online).
+func renderNetplanCmd(args []string) {
+	fs := flag.NewFlagSet("render-netplan", flag.ExitOnError)
+	configFile := fs.String("config", "", "path to a local config.yaml (required)")
+	segmentName := fs.String("segment", "", "the segments[].name to render (required)")
+	trunkIface := fs.String("trunk-iface", "ens18", "trunk NIC name, matching bootstrap.yaml's trunkInterface")
+	_ = fs.Parse(args)
+
+	if *configFile == "" || *segmentName == "" {
+		log.Fatalf("mseg-tester: render-netplan requires -config and -segment")
+	}
+	cfg, err := config.Load(*configFile, nil)
+	if err != nil {
+		log.Fatalf("mseg-tester: %v", err)
+	}
+	seg, ok := cfg.BySegmentName(*segmentName)
+	if !ok {
+		log.Fatalf("mseg-tester: segment %q not declared in %s", *segmentName, *configFile)
+	}
+	fmt.Print(netplan.Render(*trunkIface, seg))
 }
 
 func runCmd(args []string) {

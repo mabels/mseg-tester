@@ -42,12 +42,12 @@ func IfaceName(trunkInterface string, seg config.Segment) string {
 	return fmt.Sprintf("%s.%s", trunkInterface, seg.Name)
 }
 
-// Write generates and installs the netplan config for exactly one active
-// segment. Does NOT call `netplan apply` -- this tool's whole model is
-// "write config, then reboot" (see cmd/mseg-tester's run loop), so a live
-// apply here would just be redundant work before the reboot throws it
-// away and re-derives the same state from disk anyway.
-func Write(trunkInterface string, seg config.Segment) error {
+// Render builds the netplan YAML content Write would install for seg,
+// without touching disk -- split out so it can be inspected offline (see
+// cmd/mseg-tester's "render-netplan" subcommand), e.g. when a VM is stuck
+// at boot and there's no shell to read /etc/netplan/90-mseg-tester.yaml
+// from directly.
+func Render(trunkInterface string, seg config.Segment) string {
 	var content string
 	if seg.Type == "native" {
 		// The active segment IS the trunk's native/untagged VLAN --
@@ -115,6 +115,16 @@ network:
       link-local: [ipv4, ipv6]
 `, trunkInterface, ifaceName, vlanID, trunkInterface)
 	}
+	return content
+}
+
+// Write generates and installs the netplan config for exactly one active
+// segment. Does NOT call `netplan apply` -- this tool's whole model is
+// "write config, then reboot" (see cmd/mseg-tester's run loop), so a live
+// apply here would just be redundant work before the reboot throws it
+// away and re-derives the same state from disk anyway.
+func Write(trunkInterface string, seg config.Segment) error {
+	content := Render(trunkInterface, seg)
 
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
