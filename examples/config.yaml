@@ -28,11 +28,15 @@
 
 rebootDelay: "6m"   # only applies on updateSegment, after that segment's checks+update+report -- every other segment always reboots immediately. omit/"" for immediate everywhere.
 
+checkAttempts: 3       # how many times to try EACH check before giving up on it. stops as soon as one attempt passes. defaults to 3 if omitted.
+checkRetryDelay: "10s" # wait between attempts of the SAME check. defaults to "10s" if omitted.
+
 report:
   url: "http://192.168.129.88:9091/report"   # e.g. the k8s-hosted collector on the management segment
 
 segments:
   - name: "128"
+    type: native   # this trunk's untagged/native VLAN -- arrives directly on the trunk NIC, no 802.1Q tag. At most one segment may be "native"; every other segment must be "vlan".
     dnsServer: "192.168.128.5"
     dnsServer6: "fd00:192:168:128::5"
     dnsCheck: "mam-hh-gw.128.adviser.com."
@@ -46,22 +50,24 @@ segments:
     routingCheck6: "[2606:4700:4700::1111]:443"
 
   - name: "129"
+    type: vlan     # a normal 802.1Q-tagged sub-interface. ifname: is optional -- only needed if your naming convention differs from "<trunkInterface>.<name>".
     dnsServer: "192.168.129.5"
     dnsServer6: "fd00:192:168:129::5"
-    dnsCheck: "mam-hh-gw.129.adviser.com."
+    dnsCheck: "mam-hh-dmz.adviser.com."
     reverseCheck:
       ip: "192.168.129.1"
-      expect: "mam-hh-gw.129.adviser.com."
+      expect: "mam-hh-dmz.adviser.com."
     reverseCheck6:
       ip: "fd00:192:168:129::1"
-      expect: "mam-hh-gw.129.adviser.com."
+      expect: "mam-hh-dmz.adviser.com."
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 
   - name: "130"
+    type: vlan
     dnsServer: "192.168.130.5"
     dnsServer6: "fd00:192:168:130::5"
-    dnsCheck: "sw-neighbor.example."
+    dnsCheck: "for-130.adviser.com."
     geoCheck:
       url: "https://ifconfig.co/country"
       expect: "Germany"        # mullvad-de exit
@@ -69,9 +75,10 @@ segments:
     routingCheck6: "[2606:4700:4700::1111]:443"
 
   - name: "131"
+    type: vlan
     dnsServer: "192.168.131.5"
     dnsServer6: "fd00:192:168:131::5"
-    dnsCheck: "sw-usa.example."
+    dnsCheck: "mullvad-us.adviser.com."
     geoCheck:
       url: "https://ifconfig.co/country"
       expect: "United States"  # mullvad-us exit

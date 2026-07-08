@@ -93,8 +93,8 @@ func TestRenderUserDataNativeSegmentIsUpdateSegment(t *testing.T) {
 	if strings.Contains(s, "ens18.128:") {
 		t.Errorf("expected no tagged VLAN sub-interface when native segment == update segment, got:\n%s", s)
 	}
-	if !strings.Contains(s, "nativeSegment: \"128\"") {
-		t.Errorf("expected nativeSegment recorded in bootstrap.yaml, got:\n%s", s)
+	if strings.Contains(s, "nativeSegment:") {
+		t.Errorf("bootstrap.yaml no longer has a nativeSegment field (config.yaml's segment Type is now the single source of truth), got:\n%s", s)
 	}
 	assertValidYAML(t, out)
 }
@@ -152,9 +152,9 @@ func TestRenderUserDataWithSoftwareRef(t *testing.T) {
 
 func TestNet0(t *testing.T) {
 	cases := []struct {
-		name   string
-		p      Params
-		want   string
+		name string
+		p    Params
+		want string
 	}{
 		{
 			name: "no vlans at all -- fully untagged",

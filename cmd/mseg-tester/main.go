@@ -156,7 +156,7 @@ func run(bootstrapPath string, noReboot bool) error {
 	result := state.Result{
 		Segment:   seg.Name,
 		Timestamp: time.Now().UTC(),
-		Checks:    checks.Run(seg, boot.TrunkInterface, boot.NativeSegment),
+		Checks:    checks.Run(seg, boot.TrunkInterface, cfg.CheckAttemptsOrDefault(), cfg.CheckRetryDelayOrDefault()),
 		Version:   currentVersion,
 	}
 
@@ -175,7 +175,11 @@ func run(bootstrapPath string, noReboot bool) error {
 	}
 
 	next := active.Next()
-	if err := netplan.Write(boot.TrunkInterface, next, boot.NativeSegment); err != nil {
+	nextSeg, ok := cfg.BySegmentName(next)
+	if !ok {
+		return fmt.Errorf("next segment %q not declared in %s", next, boot.ConfigLocalPath)
+	}
+	if err := netplan.Write(boot.TrunkInterface, nextSeg); err != nil {
 		return fmt.Errorf("writing netplan for next segment %s: %w", next, err)
 	}
 	if err := state.SaveActive(boot.StateDir, state.Active{Segment: next, Cycle: active.Cycle}); err != nil {

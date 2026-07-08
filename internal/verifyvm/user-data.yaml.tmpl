@@ -97,7 +97,6 @@ write_files:
     permissions: "0600"
     content: |
       trunkInterface: {{.TrunkIface}}
-      nativeSegment: "{{.NativeSegment}}"
       updateSegment: "{{.UpdateSegment}}"
       softwareRepo: "{{.SoftwareRepo}}"
       softwareRef: "{{if .SoftwareRef}}{{.SoftwareRef}}{{else}}latest{{end}}"

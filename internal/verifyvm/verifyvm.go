@@ -52,12 +52,18 @@ type Params struct {
 	Name string
 
 	// create-only: disk/image/network placement.
-	Storage    string
-	Image      string // path to a cloud-init-ready disk image, ON the Proxmox host
-	Bridge     string
-	TrunkVLANs []string // VLAN IDs to trunk, TAGGED; empty = untagged (every VLAN passes). Does not include NativeSegment -- see net0.
-	Cores      int
-	MemoryMB   int
+	Storage string
+	Image   string // path to a cloud-init-ready disk image, ON the Proxmox host
+	Bridge  string
+	// TrunkVLANs is every segment's VLAN ID, TAGGED, EXCLUDING NativeSegment
+	// -- see net0. Populated automatically by cmd/verify-mseg-tester from
+	// -config-file's segments (config.Config.CycleNames), NOT a direct CLI
+	// flag: config.yaml is now the one place a segment list is declared.
+	// Empty (no -config-file, config-repo-only) means "untagged trunk,
+	// every VLAN passes" -- see net0.
+	TrunkVLANs      []string
+	Cores           int
+	MemoryMB        int
 	DiskSize        string // e.g. "8G", passed to `qm resize`
 	BIOS            string // "seabios" or "ovmf"
 	Onboot          bool
@@ -68,10 +74,14 @@ type Params struct {
 	// create-only: rendered into the cloud-init user-data (see
 	// internal/bootstrap for what each of these means on the guest side).
 	TrunkIface string
-	// NativeSegment is OPTIONAL -- see bootstrap.Bootstrap.NativeSegment.
-	// When set, the Proxmox NIC is configured with that VLAN as net0's
-	// "tag=" (untagged/native) rather than lumped into "trunks=" with
-	// the other, genuinely tagged segments -- see net0.
+	// NativeSegment is OPTIONAL -- populated automatically by
+	// cmd/verify-mseg-tester from -config-file's segments
+	// (config.Config.NativeSegmentName), NOT a direct CLI flag: config.yaml's
+	// per-segment Type is now the one source of truth for which segment (if
+	// any) is the trunk's native/untagged VLAN -- see internal/config and
+	// internal/netplan.IfaceName. When set, the Proxmox NIC is configured
+	// with that VLAN as net0's "tag=" (untagged/native) rather than lumped
+	// into "trunks=" with the other, genuinely tagged segments -- see net0.
 	NativeSegment    string
 	UpdateSegment    string
 	SoftwareRepo     string
@@ -174,10 +184,12 @@ func (p Params) RenderUserData() ([]byte, error) {
 // passes) or restricted to TrunkVLANs. With NativeSegment set, that one
 // VLAN is instead Proxmox's "tag=" (delivered untagged/native), and only
 // the OTHER, genuinely-tagged segments go into "trunks=" -- matching
-// bootstrap.Bootstrap.NativeSegment/internal/netplan.IfaceName's split on
-// the guest side. See ValidateCreate: NativeSegment (if set) must also
-// appear in TrunkVLANs, since that's the one place the operator declares
-// the full segment list to this tool.
+// config.Segment.Type/internal/netplan.IfaceName's split on the guest
+// side. Both fields are derived together, from the same -config-file, by
+// cmd/verify-mseg-tester (see TrunkVLANs/NativeSegment above), so the
+// ValidateCreate invariant below (NativeSegment, if set, is also in
+// TrunkVLANs) should always hold in practice -- it's kept as a defensive
+// check, not a user-facing flag-combination rule anymore.
 func (p Params) net0() string {
 	if p.NativeSegment == "" {
 		if len(p.TrunkVLANs) == 0 {
@@ -257,7 +269,12 @@ func (p Params) ValidateCreate() error {
 			}
 		}
 		if !found {
-			return fmt.Errorf("-native-segment %q must also be listed in -trunk-vlans", p.NativeSegment)
+			// Should be unreachable in practice: both fields are derived
+			// together from the same -config-file (see TrunkVLANs/
+			// NativeSegment's doc comments) -- this is a defensive
+			// internal-consistency check, not something an operator can
+			// trigger by hand anymore.
+			return fmt.Errorf("internal inconsistency: native segment %q not found among trunk VLANs %v (derived from -config-file)", p.NativeSegment, p.TrunkVLANs)
 		}
 	}
 	return nil

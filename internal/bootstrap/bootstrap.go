@@ -23,21 +23,10 @@ import (
 type Bootstrap struct {
 	// TrunkInterface is the guest NIC carrying every segment's VLAN tag.
 	TrunkInterface string `yaml:"trunkInterface"`
-	// NativeSegment is OPTIONAL -- the one segment (if any) that arrives
-	// on TrunkInterface UNTAGGED, i.e. Proxmox's net0 "tag=" VLAN rather
-	// than one of its "trunks=" list. A trunk port carries some number of
-	// tagged VLANs PLUS, usually, one native/untagged VLAN -- on this
-	// project's real network that's segment "128" (the home network):
-	// its traffic is NOT on a TrunkInterface.128 sub-interface at all,
-	// it's directly on TrunkInterface itself. Every OTHER segment is a
-	// normal 802.1Q-tagged VLAN sub-interface (TrunkInterface.<segment>).
-	//
-	// Leave empty (the default) if every segment is a tagged VLAN and
-	// there's no native/untagged one at all.
-	NativeSegment string `yaml:"nativeSegment,omitempty"`
 	// UpdateSegment is the only segment with a route to the internet --
-	// self-update and config-sync are only ever attempted from here.
-	// May or may not be the same as NativeSegment; both are handled.
+	// self-update and config-sync are only ever attempted from here. May
+	// or may not also be config.yaml's native segment (config.Segment.Type
+	// == "native"); both are handled -- see internal/netplan.IfaceName.
 	UpdateSegment string `yaml:"updateSegment"`
 	// SoftwareRepo is "owner/repo" (assumed to be on github.com) for this
 	// tool's own PUBLIC source -- internal/selfupdate builds it into a Go

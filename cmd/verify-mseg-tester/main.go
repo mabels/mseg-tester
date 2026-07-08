@@ -20,6 +20,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mabels/mseg-tester/internal/config"
 	"github.com/mabels/mseg-tester/internal/sshrun"
 	"github.com/mabels/mseg-tester/internal/verifyvm"
 )
@@ -78,8 +79,6 @@ func runCreate(args []string) {
 	fs.StringVar(&p.Storage, "storage", "", "Proxmox storage ID for the VM disk (required)")
 	fs.StringVar(&p.Image, "image", "", "path to a cloud-init-ready disk image, ON the Proxmox host (required)")
 	fs.StringVar(&p.Bridge, "bridge", "", "Proxmox bridge name (required)")
-	trunkVLANs := fs.String("trunk-vlans", "", "comma-separated VLAN IDs to trunk, e.g. 128,129,130,131 (empty = untagged, every VLAN passes -- the bridge must already be VLAN-aware)")
-	fs.StringVar(&p.NativeSegment, "native-segment", "", "the one segment (if any) that's this trunk's native/untagged VLAN, e.g. 128 -- must also be in -trunk-vlans if that's non-empty. Leave empty if every segment is a normal tagged VLAN")
 	fs.IntVar(&p.Cores, "cores", 2, "vCPUs")
 	fs.IntVar(&p.MemoryMB, "memory", 1024, "memory in MB")
 	fs.StringVar(&p.DiskSize, "disk-size", "8G", "disk size after import, passed to `qm resize`")
@@ -92,7 +91,7 @@ func runCreate(args []string) {
 	fs.StringVar(&p.TrunkIface, "trunk-iface", "ens18", "NIC name inside the guest")
 	fs.StringVar(&p.UpdateSegment, "update-segment", "", "the one VLAN/segment with internet access (required)")
 	fs.StringVar(&p.SoftwareRepo, "software-repo", "", "owner/repo (on github.com) `go install` builds mseg-tester from -- no release needed (required)")
-	configFile := fs.String("config-file", "", "path to a plain local config.yaml to deploy as-is -- no private repo or token needed (the easy path; see examples/config.yaml). Required unless -config-repo is set")
+	configFile := fs.String("config-file", "", "path to a plain local config.yaml to deploy as-is -- no private repo or token needed (the easy path; see examples/config.yaml). Also read to derive the trunk's VLAN list and native segment (config.Segment.Type/IfName -- see internal/config), so -trunk-vlans/-native-segment no longer exist as separate flags. Required unless -config-repo is set")
 	fs.StringVar(&p.ConfigRepo, "config-repo", "", "URL of a private (or public) repo to fetch/refresh config.yaml from at runtime instead, e.g. https://github.com/owner/repo. Required unless -config-file is set")
 	fs.StringVar(&p.ConfigPath, "config-path", "config.yaml", "path of config.yaml within config-repo")
 	fs.StringVar(&p.ConfigRef, "config-ref", "main", "branch/tag/commit to fetch config.yaml at")
@@ -106,12 +105,6 @@ func runCreate(args []string) {
 	yes := fs.Bool("yes", false, "actually connect to the Proxmox host and run these commands (default: print the plan only)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
-	}
-
-	if *trunkVLANs != "" {
-		for _, v := range strings.Split(*trunkVLANs, ",") {
-			p.TrunkVLANs = append(p.TrunkVLANs, strings.TrimSpace(v))
-		}
 	}
 
 	p.ConfigToken = *configToken
@@ -128,6 +121,20 @@ func runCreate(args []string) {
 			log.Fatalf("verify-mseg-tester: reading -config-file: %v", err)
 		}
 		p.ConfigYAML = string(b)
+
+		// Derive the trunk's VLAN list and native segment from config.yaml
+		// itself (config.Segment.Type/IfName) rather than separate
+		// -trunk-vlans/-native-segment flags -- one source of truth,
+		// nothing to keep in sync by hand. See internal/config's package
+		// doc and internal/netplan.IfaceName.
+		parsedCfg, err := config.Load(*configFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: parsing -config-file: %v", err)
+		}
+		p.TrunkVLANs = parsedCfg.CycleNames()
+		if native, ok := parsedCfg.NativeSegmentName(); ok {
+			p.NativeSegment = native
+		}
 	}
 	if *sshKeyFile != "" {
 		b, err := os.ReadFile(*sshKeyFile)

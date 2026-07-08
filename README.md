@@ -43,6 +43,12 @@ test every cycle, entirely self-contained inside the guest.
 
 ## How a cycle works
 
+Every check below (`dhcp`/`dhcp6`/`dns`/`dns6`/`reverse`/`reverse6`/`geo`/
+`routing`/`routing6`) is retried independently on failure — up to
+`config.yaml`'s `checkAttempts` times (default 3), waiting
+`checkRetryDelay` between tries (default `10s`), stopping as soon as one
+attempt passes.
+
 1. Read `/mseg-tester/active.yaml` — which segment is active right now.
 2. **Only if** the active segment is `updateSegment` AND `bootstrap.yaml`'s
    `configRepo` is set: fetch the latest `config.yaml` from that repo
@@ -55,6 +61,11 @@ test every cycle, entirely self-contained inside the guest.
    this binary starts, see the systemd unit's
    `After=network-online.target`; this step confirms the *outcome*, it
    doesn't run its own DHCP client or send its own router solicitation).
+   Both checks also record, best-effort, the interface's default gateway
+   (`ip route show default`, IPv4 and IPv6 separately) and, for `dhcp6`,
+   every SLAAC-assigned global IPv6 address seen (not just the first) —
+   all appended to the check's `Detail`, purely informational, never
+   fails the check on their own.
 4. Resolve a configured record directly against that segment's own DNS
    server over IPv4 (`dns`), and over IPv6 too if `dnsServer6` is set
    (`dns6`) — then, if `reverseCheck`/`reverseCheck6` are set, confirm
@@ -109,11 +120,12 @@ block:
   other credential-bearing file.
 
 First boot brings up segment 129 directly (the only one cloud-init itself
-can reach the internet through), builds the binary via `go install`
-(cloud-init installs the `golang-go` package for this — see `packages:`),
-runs `mseg-tester deploy` (installs the systemd unit), and reboots into
-the first real cycle. If `configRepo` is set, the unit's own first `run`
-also syncs `config.yaml` from it.
+can reach the internet through), installs the Go toolchain from the
+official tarball at go.dev (not an apt package — see the bootstrap
+script's comments for why), builds the binary via `go install`, runs
+`mseg-tester deploy` (installs the systemd unit), and reboots into the
+first real cycle. If `configRepo` is set, the unit's own first `run` also
+syncs `config.yaml` from it.
 
 ## Releasing an update
 
@@ -156,7 +168,6 @@ at all.
 | Field | Meaning |
 |---|---|
 | `trunkInterface` | The guest NIC carrying every segment's VLAN tag |
-| `nativeSegment` | Optional. The one segment (if any) that's this trunk's native/UNTAGGED VLAN — it arrives directly on `trunkInterface`, not on a `trunkInterface.<segment>` sub-interface. Leave empty if every segment is a normal tagged VLAN |
 | `updateSegment` | The one segment config-sync/self-update/report are attempted from |
 | `softwareRepo` | `owner/repo`, assumed to be on `github.com` — built into a Go module path (`github.com/<softwareRepo>/cmd/mseg-tester`) that `go install` builds directly, no release step |
 | `softwareRef` | Git branch/tag/commit `go install` builds — for both the first install and every self-update. Defaults to `"latest"` (the newest semver tag) if empty |
@@ -167,13 +178,20 @@ at all.
 | `stateDir` | Defaults to `/mseg-tester` |
 | `configLocalPath` | Where `config.yaml` lives — either written directly by cloud-init, or fetched into, depending on `configRepo`. Defaults to `/mseg-tester/config.yaml` |
 
+Which segment (if any) is this trunk's native/untagged VLAN is declared in
+`config.yaml` now, not here — see `segments[].type` below.
+
 ## `config.yaml` reference (see `examples/config.yaml`; either written directly by cloud-init or fetched from `configRepo` — same shape either way)
 
 | Field | Meaning |
 |---|---|
 | `rebootDelay` | Optional Go duration (e.g. `"6m"`) to wait, only on `updateSegment`, before rebooting into the next segment. Every other segment always reboots immediately. Omit for immediate everywhere |
+| `checkAttempts` | Optional. How many times to try EACH check before giving up on it — stops as soon as one attempt passes. Defaults to `3` if omitted |
+| `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait between attempts of the same check. Defaults to `"10s"` if omitted |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
+| `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether the segment becomes Proxmox `net0`'s `tag=` or `trunks=` — the single source of truth for "which segment is native" |
+| `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |
 | `segments[].dnsServer` / `.dnsCheck` | Resolver to query (IPv4), record expected to resolve |
 | `segments[].dnsServer6` | Optional. Same resolver's IPv6 address, e.g. `fd00:192:168:129::5` — runs the same `dnsCheck` record over IPv6 (`dns6`); omit to skip |
 | `segments[].reverseCheck` | Optional `{ip, expect}` — confirms `dnsServer` also answers a PTR query for `ip` with `expect` (`reverse`); omit to skip |
@@ -213,8 +231,6 @@ go run ./cmd/verify-mseg-tester create \
   -storage local-lvm \
   -image /var/lib/vz/template/iso/ubuntu-24.04-server-cloudimg-amd64.img \
   -bridge vmbr0 \
-  -trunk-vlans 128,129,130,131 \
-  -native-segment 128 \
   -update-segment 129 \
   -software-repo mabels/mseg-tester \
   -config-file ./examples/config.yaml \
@@ -234,13 +250,16 @@ Notes:
   `bridge-vlan-aware yes`; OVS bridge: works implicitly) — that, like
   mseg-tester's own trunk-NIC requirement, stays a one-time manual
   prerequisite, never automated.
-- `-trunk-vlans` restricts which VLANs the NIC trunks; omit it for a
-  fully-untagged NIC that passes every VLAN.
-- `-native-segment` marks one of `-trunk-vlans` as the port's
-  native/untagged VLAN (Proxmox `net0`'s `tag=`) instead of a tagged one
-  — matches `bootstrap.yaml`'s `nativeSegment` on the guest side
-  (`internal/netplan.IfaceName`). Must also appear in `-trunk-vlans` if
-  that's non-empty. Omit if every segment is a normal tagged VLAN.
+- There are no `-trunk-vlans`/`-native-segment` flags — the Proxmox NIC's
+  trunked VLAN list and, if any, its native/untagged VLAN are both derived
+  automatically from `-config-file`'s `segments[].name`/`.type`
+  (`internal/config.Config.CycleNames`/`.NativeSegmentName`), the same
+  `type: native`/`type: vlan` fields that drive the guest-side interface
+  naming (`internal/netplan.IfaceName`) — one source of truth instead of
+  two lists to keep in sync by hand. If you use `-config-repo` instead
+  (config.yaml fetched at runtime, not given as a local file), the trunk
+  is left fully untagged (every VLAN passes) since there's no local
+  segment list to derive from at create-time.
 - `config.yaml` needs to come from either `-config-file` (a plain local
   file deployed as-is — no repo or token needed, the easy path shown
   above) or `-config-repo` (fetched/refreshed at runtime instead;

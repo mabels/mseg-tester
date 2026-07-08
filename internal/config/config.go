@@ -52,6 +52,22 @@ type Segment struct {
 	// already use the VLAN ID as the name (see topology.ts), and there's
 	// no reason for this tool to invent a second identifier scheme.
 	Name string `yaml:"name"`
+	// Type is either "native" (this trunk's untagged/native VLAN -- its
+	// traffic arrives directly on the trunk interface, no 802.1Q tag at
+	// all) or "vlan" (a normal 802.1Q-tagged sub-interface, the common
+	// case). Required on every segment: at most one may be "native" (a
+	// trunk has at most one native VLAN), enforced by Load. Drives
+	// interface naming (internal/netplan.IfaceName) AND, for
+	// cmd/verify-mseg-tester, which VLAN becomes the Proxmox NIC's
+	// "tag=" vs. "trunks=" -- this field is the single source of truth
+	// for "which segment is native," replacing what used to be a
+	// separate, hand-kept bootstrap.yaml field of the same meaning.
+	Type string `yaml:"type"`
+	// IfName is OPTIONAL -- overrides the interface name
+	// internal/netplan.IfaceName would otherwise derive (normally
+	// "<trunkInterface>" for the native segment, "<trunkInterface>.<Name>"
+	// for a tagged one). Only needed if your naming convention differs.
+	IfName string `yaml:"ifname,omitempty"`
 	// DNSServer is the segment-local resolver to query directly (its
 	// own Technitium instance, typically <subnet>.5).
 	DNSServer string `yaml:"dnsServer"`
@@ -110,9 +126,20 @@ type Config struct {
 	// value, so the delay is paid once per full cycle, not once per
 	// segment. Empty/zero means updateSegment reboots immediately too. A
 	// Go duration string (time.ParseDuration).
-	RebootDelay string    `yaml:"rebootDelay,omitempty"`
-	Report      *Report   `yaml:"report,omitempty"`
-	Segments    []Segment `yaml:"segments"`
+	RebootDelay string `yaml:"rebootDelay,omitempty"`
+	// CheckAttempts is how many times to try EACH check (dhcp, dns,
+	// reverse, geo, routing, ...) before giving up on it -- defaults to 3
+	// if zero/unset. Stops retrying as soon as one attempt passes; a
+	// check that never passes reports its last failing attempt, with the
+	// total attempt count appended to Detail.
+	CheckAttempts int `yaml:"checkAttempts,omitempty"`
+	// CheckRetryDelay is how long to wait between attempts of the SAME
+	// check -- defaults to "10s" if empty. A Go duration string. Has
+	// nothing to do with RebootDelay (that's once per cycle, on
+	// updateSegment only; this is per-check, on every segment).
+	CheckRetryDelay string    `yaml:"checkRetryDelay,omitempty"`
+	Report          *Report   `yaml:"report,omitempty"`
+	Segments        []Segment `yaml:"segments"`
 }
 
 // RebootDelayDuration parses RebootDelay, defaulting to 0 (immediate) for
@@ -125,6 +152,28 @@ func (c Config) RebootDelayDuration() time.Duration {
 	d, err := time.ParseDuration(c.RebootDelay)
 	if err != nil {
 		return 0
+	}
+	return d
+}
+
+// CheckAttemptsOrDefault returns CheckAttempts, defaulting to 3 for
+// zero/negative (unset, or a malformed/nonsensical config.yaml value).
+func (c Config) CheckAttemptsOrDefault() int {
+	if c.CheckAttempts <= 0 {
+		return 3
+	}
+	return c.CheckAttempts
+}
+
+// CheckRetryDelayOrDefault parses CheckRetryDelay, defaulting to 10s for
+// empty, malformed, or non-positive values.
+func (c Config) CheckRetryDelayOrDefault() time.Duration {
+	if c.CheckRetryDelay == "" {
+		return 10 * time.Second
+	}
+	d, err := time.ParseDuration(c.CheckRetryDelay)
+	if err != nil || d <= 0 {
+		return 10 * time.Second
 	}
 	return d
 }
@@ -163,5 +212,31 @@ func Load(path string) (Config, error) {
 	if len(c.Segments) == 0 {
 		return c, fmt.Errorf("config: %s declares no segments", path)
 	}
+	natives := 0
+	for _, s := range c.Segments {
+		switch s.Type {
+		case "native":
+			natives++
+		case "vlan":
+			// fine
+		default:
+			return c, fmt.Errorf("config: %s: segment %q has invalid type %q (must be \"native\" or \"vlan\")", path, s.Name, s.Type)
+		}
+	}
+	if natives > 1 {
+		return c, fmt.Errorf("config: %s: %d segments declared type \"native\" -- a trunk has at most one native/untagged VLAN", path, natives)
+	}
 	return c, nil
+}
+
+// NativeSegmentName returns the one segment whose Type is "native", or
+// ""/false if every segment is a normal tagged VLAN. Load already
+// guarantees at most one exists.
+func (c Config) NativeSegmentName() (string, bool) {
+	for _, s := range c.Segments {
+		if s.Type == "native" {
+			return s.Name, true
+		}
+	}
+	return "", false
 }

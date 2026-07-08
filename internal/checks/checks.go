@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -38,32 +39,66 @@ const timeout = 8 * time.Second
 // configured) -- fixed order so <segment>.result.yaml reads the same
 // shape every time, easier to diff across runs by hand.
 //
-// nativeSegment is bootstrap.Bootstrap.NativeSegment, passed through
-// unchanged -- see netplan.IfaceName for what it means. Empty is fine:
-// every segment is then assumed to be a normal tagged VLAN.
-func Run(seg config.Segment, trunkInterface, nativeSegment string) []state.CheckResult {
+// Which interface belongs to seg -- and whether it's the trunk's
+// native/untagged VLAN or a tagged sub-interface -- comes entirely from
+// seg.Type/seg.IfName (config.yaml is the single source of truth here;
+// see netplan.IfaceName), not from any separate bootstrap-level field.
+//
+// attempts/retryDelay come from config.Config's CheckAttemptsOrDefault/
+// CheckRetryDelayOrDefault -- EVERY check below is retried independently
+// up to attempts times (stopping as soon as one passes), waiting
+// retryDelay between tries. Applies uniformly, including dhcp/dhcp6:
+// those just read already-settled interface state (network-online.target
+// already waited for it), but a retry costs nothing and guards against
+// any lingering race, not just the network-dependent checks.
+func Run(seg config.Segment, trunkInterface string, attempts int, retryDelay time.Duration) []state.CheckResult {
+	if attempts <= 0 {
+		attempts = 1
+	}
 	results := []state.CheckResult{
-		dhcpCheck(seg, trunkInterface, nativeSegment),
-		dhcp6Check(seg, trunkInterface, nativeSegment),
-		dnsCheck(seg),
+		withRetry(attempts, retryDelay, func() state.CheckResult { return dhcpCheck(seg, trunkInterface) }),
+		withRetry(attempts, retryDelay, func() state.CheckResult { return dhcp6Check(seg, trunkInterface) }),
+		withRetry(attempts, retryDelay, func() state.CheckResult { return dnsCheck(seg) }),
 	}
 	if seg.DNSServer6 != "" {
-		results = append(results, dns6Check(seg))
+		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return dns6Check(seg) }))
 	}
 	if seg.ReverseCheck != nil {
-		results = append(results, reverseCheck(seg))
+		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return reverseCheck(seg) }))
 	}
 	if seg.ReverseCheck6 != nil && seg.DNSServer6 != "" {
-		results = append(results, reverse6Check(seg))
+		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return reverse6Check(seg) }))
 	}
 	if seg.GeoCheck != nil {
-		results = append(results, geoCheck(seg))
+		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return geoCheck(seg) }))
 	}
-	results = append(results, routingCheck(seg))
+	results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return routingCheck(seg) }))
 	if seg.RoutingCheck6 != "" {
-		results = append(results, routing6Check(seg))
+		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return routing6Check(seg) }))
 	}
 	return results
+}
+
+// withRetry calls fn up to attempts times, stopping as soon as one
+// attempt passes. On a check that never passes, the last failing
+// result's Detail gets the attempt count appended, so
+// <segment>.result.yaml distinguishes "failed once" from "failed after
+// every retry" without needing a separate field.
+func withRetry(attempts int, delay time.Duration, fn func() state.CheckResult) state.CheckResult {
+	var last state.CheckResult
+	for i := 1; i <= attempts; i++ {
+		last = fn()
+		if last.Pass {
+			return last
+		}
+		if i < attempts {
+			time.Sleep(delay)
+		}
+	}
+	if attempts > 1 {
+		last.Detail = fmt.Sprintf("%s (failed all %d attempts)", last.Detail, attempts)
+	}
+	return last
 }
 
 // dhcpCheck doesn't send its own DHCPDISCOVER -- netplan/systemd-networkd
@@ -74,10 +109,12 @@ func Run(seg config.Segment, trunkInterface, nativeSegment string) []state.Check
 // netplan.IfaceName) have a real, non-link-local IPv4 address bound to
 // it. That's the observable proof DHCP succeeded, without this tool
 // needing to re-implement a DHCP client itself just to double-check one
-// already run.
-func dhcpCheck(seg config.Segment, trunkInterface, nativeSegment string) state.CheckResult {
+// already run. Detail also reports the IPv4 default gateway learned via
+// that interface, if any (defaultGateway) -- best-effort, never fails
+// the check by itself.
+func dhcpCheck(seg config.Segment, trunkInterface string) state.CheckResult {
 	name := "dhcp"
-	ifaceName := netplan.IfaceName(trunkInterface, seg.Name, nativeSegment)
+	ifaceName := netplan.IfaceName(trunkInterface, seg)
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("interface %s: %v", ifaceName, err)}
@@ -91,20 +128,27 @@ func dhcpCheck(seg config.Segment, trunkInterface, nativeSegment string) state.C
 		if !ok || ipNet.IP.To4() == nil || ipNet.IP.IsLinkLocalUnicast() {
 			continue
 		}
-		return state.CheckResult{Name: name, Pass: true, Detail: ipNet.IP.String()}
+		detail := ipNet.IP.String()
+		if gw := defaultGateway(ifaceName, false); gw != "" {
+			detail = fmt.Sprintf("%s (gw %s)", detail, gw)
+		}
+		return state.CheckResult{Name: name, Pass: true, Detail: detail}
 	}
 	return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("no non-link-local IPv4 address on %s", ifaceName)}
 }
 
 // dhcp6Check is dhcpCheck's IPv6 counterpart: confirms the same VLAN
-// sub-interface also picked up a global (non-link-local) IPv6 address,
-// via SLAAC. Unconditional and needs no per-segment config, exactly like
-// dhcpCheck -- just interface state. See the package doc for why this is
-// also, incidentally, a live regression check for OVN's solicited-RA-only
-// behavior on this network.
-func dhcp6Check(seg config.Segment, trunkInterface, nativeSegment string) state.CheckResult {
+// sub-interface also picked up at least one global (non-link-local) IPv6
+// address, via SLAAC. Unconditional and needs no per-segment config,
+// exactly like dhcpCheck -- just interface state. See the package doc for
+// why this is also, incidentally, a live regression check for OVN's
+// solicited-RA-only behavior on this network. Detail lists EVERY global
+// address found (SLAAC can hand out more than one, e.g. a stable address
+// alongside an RFC 4941 privacy/temporary one) plus the IPv6 default
+// gateway learned via that interface, if any (defaultGateway).
+func dhcp6Check(seg config.Segment, trunkInterface string) state.CheckResult {
 	name := "dhcp6"
-	ifaceName := netplan.IfaceName(trunkInterface, seg.Name, nativeSegment)
+	ifaceName := netplan.IfaceName(trunkInterface, seg)
 	iface, err := net.InterfaceByName(ifaceName)
 	if err != nil {
 		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("interface %s: %v", ifaceName, err)}
@@ -113,17 +157,49 @@ func dhcp6Check(seg config.Segment, trunkInterface, nativeSegment string) state.
 	if err != nil {
 		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("reading addrs on %s: %v", ifaceName, err)}
 	}
+	var globals []string
 	for _, a := range addrs {
 		ipNet, ok := a.(*net.IPNet)
 		if !ok || ipNet.IP.To4() != nil || ipNet.IP.IsLinkLocalUnicast() {
 			continue
 		}
-		return state.CheckResult{Name: name, Pass: true, Detail: ipNet.IP.String()}
+		globals = append(globals, ipNet.IP.String())
 	}
-	return state.CheckResult{
-		Name: name, Pass: false,
-		Detail: fmt.Sprintf("no global IPv6 address on %s (SLAAC via solicited RA may not have completed)", ifaceName),
+	if len(globals) == 0 {
+		return state.CheckResult{
+			Name: name, Pass: false,
+			Detail: fmt.Sprintf("no global IPv6 address on %s (SLAAC via solicited RA may not have completed)", ifaceName),
+		}
 	}
+	detail := strings.Join(globals, ",")
+	if gw := defaultGateway(ifaceName, true); gw != "" {
+		detail = fmt.Sprintf("%s (gw %s)", detail, gw)
+	}
+	return state.CheckResult{Name: name, Pass: true, Detail: detail}
+}
+
+// defaultGateway shells out to `ip [-6] route show default dev iface`
+// and returns the "via" address, or "" if there's no default route
+// through iface (expected for every segment except updateSegment) or the
+// command fails for any reason -- best-effort only, never itself a
+// reason to fail dhcpCheck/dhcp6Check. iproute2 (the `ip` binary) is
+// always present on Ubuntu Server, so this needs no extra dependency.
+func defaultGateway(iface string, ipv6 bool) string {
+	args := []string{"route", "show", "default", "dev", iface}
+	if ipv6 {
+		args = append([]string{"-6"}, args...)
+	}
+	out, err := exec.Command("ip", args...).Output()
+	if err != nil {
+		return ""
+	}
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "via" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
 }
 
 // dnsCheck resolves DNSCheck directly against this segment's own resolver
