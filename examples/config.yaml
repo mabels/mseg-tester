@@ -50,15 +50,20 @@ report:
   # internal/report.PushInflux. "url" is InfluxDB's own base URL, not a
   # path you have to build yourself. "token" MUST be a write-only token
   # scoped to ONLY this one bucket (`influx auth create --write-bucket
-  # <id>`) -- never the InfluxDB admin/all-access token. The placeholder
-  # below is not a real credential; replace it with your own before
-  # deploying (treat it with the same care as bootstrap.yaml's
-  # configToken -- this file ends up in plaintext on every VM).
+  # <id>`) -- never the InfluxDB admin/all-access token.
+  #
+  # "${INFLUX_TOKEN}" here is NOT a literal value -- it's expanded at
+  # load time (internal/envfile) from bootstrap.yaml's EnvFile (defaults
+  # to /etc/mseg-tester/.env, written once by cloud-init, 0600, never
+  # synced anywhere) or the real process environment. This is what lets
+  # config.yaml itself -- which may be fetched from a shared or even
+  # public configRepo -- stay free of the actual secret; only the small,
+  # local-only .env file ever holds it.
   influx:
     url: "https://mam-influx.adviser.com"
     org: "homeassistant"
     bucket: "mseg-tester"
-    token: "REPLACE_WITH_A_WRITE_ONLY_TOKEN_SCOPED_TO_THIS_BUCKET"
+    token: "${INFLUX_TOKEN}"
 
 segments:
   - name: "128"

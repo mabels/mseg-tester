@@ -204,11 +204,20 @@ at all.
 | `configToken` | Fine-grained GitHub PAT, read-only, scoped to only `configRepo`. Leave empty if `configRepo` is empty or public |
 | `stateDir` | Defaults to `/mseg-tester` |
 | `configLocalPath` | Where `config.yaml` lives — either written directly by cloud-init, or fetched into, depending on `configRepo`. Defaults to `/mseg-tester/config.yaml` |
+| `envFile` | Optional. Path to a simple `KEY=VALUE` `.env` file (`internal/envfile`) used to expand `"${VAR}"` references anywhere in `config.yaml`'s text before it's parsed — see below. Defaults to `/etc/mseg-tester/.env`. Written once by cloud-init, 0600, and — like this file — never synced via `configRepo` |
 
 Which segment (if any) is this trunk's native/untagged VLAN is declared in
 `config.yaml` now, not here — see `segments[].type` below.
 
 ## `config.yaml` reference (see `examples/config.yaml`; either written directly by cloud-init or fetched from `configRepo` — same shape either way)
+
+Any string value in this file may reference `"${VAR}"` — expanded at load
+time against `bootstrap.yaml`'s `envFile` (or, missing that, the real
+process environment; an unresolved reference is left untouched rather
+than silently becoming empty). This is how `report.influx.token` below
+can be a real secret without `config.yaml` itself ever holding one —
+handy since `config.yaml` may be fetched from a shared or even public
+`configRepo`, while the small `.env` file never leaves the VM.
 
 | Field | Meaning |
 |---|---|
@@ -216,7 +225,7 @@ Which segment (if any) is this trunk's native/untagged VLAN is declared in
 | `checkAttempts` | Optional. How many times to run the WHOLE batch of checks before giving up — if ANY check fails, the whole batch (not just that check) is re-run. Stops as soon as one full attempt passes every check. Defaults to `3` if omitted |
 | `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait before re-running the whole batch after a failure. Defaults to `"10s"` if omitted |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
-| `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket` — see `internal/report.PushInflux` and `examples/config.yaml`'s comment on creating one |
+| `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket`, typically written as `"${INFLUX_TOKEN}"` (see the `"${VAR}"` expansion note above) rather than a literal value — see `internal/report.PushInflux` and `examples/config.yaml` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether the segment becomes Proxmox `net0`'s `tag=` or `trunks=` — the single source of truth for "which segment is native" |
 | `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |

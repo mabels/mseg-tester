@@ -9,6 +9,13 @@
 // segment can reach the internet, where the two repos are -- lives in
 // internal/bootstrap instead, since those facts have to be known BEFORE
 // this file can even be fetched.
+//
+// Load expands "${VAR}" references in the raw file text (internal/envfile)
+// before parsing it as YAML -- lets a value like report.influx.token be
+// written as "${INFLUX_TOKEN}" instead of a literal secret, so config.yaml
+// itself stays safe to keep in a shared or even public repo (see
+// bootstrap.Bootstrap.EnvFile) while the real value lives in a small,
+// local-only .env file instead.
 package config
 
 import (
@@ -16,6 +23,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/mabels/mseg-tester/internal/envfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -263,13 +271,21 @@ func (c Config) CycleNames() []string {
 	return names
 }
 
-func Load(path string) (Config, error) {
+// Load reads and parses path, expanding any "${VAR}" references against
+// envVars first (see envfile.Expand -- a nil/empty map still falls back
+// to the real process environment for each reference, so this works even
+// when no .env file exists at all). Pass bootstrap.Bootstrap.EnvFile's
+// contents (envfile.Load) as envVars; pass nil if there's no env file to
+// load at all (e.g. cmd/verify-mseg-tester deriving VLANs from a local
+// -config-file before any VM, let alone its .env, exists).
+func Load(path string, envVars map[string]string) (Config, error) {
 	var c Config
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return c, fmt.Errorf("config: reading %s: %w", path, err)
 	}
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	expanded := envfile.Expand(string(b), envVars)
+	if err := yaml.Unmarshal([]byte(expanded), &c); err != nil {
 		return c, fmt.Errorf("config: parsing %s: %w", path, err)
 	}
 	if len(c.Segments) == 0 {

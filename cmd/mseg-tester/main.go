@@ -62,6 +62,7 @@ import (
 	"github.com/mabels/mseg-tester/internal/config"
 	"github.com/mabels/mseg-tester/internal/configsync"
 	"github.com/mabels/mseg-tester/internal/deploy"
+	"github.com/mabels/mseg-tester/internal/envfile"
 	"github.com/mabels/mseg-tester/internal/netplan"
 	"github.com/mabels/mseg-tester/internal/report"
 	"github.com/mabels/mseg-tester/internal/selfupdate"
@@ -144,7 +145,15 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		}
 	}
 
-	cfg, err := config.Load(boot.ConfigLocalPath)
+	envVars, err := envfile.Load(boot.EnvFile)
+	if err != nil {
+		return fmt.Errorf("loading env file: %w", err)
+	}
+	if verbose && len(envVars) > 0 {
+		log.Printf("run: loaded %d var(s) from %s for \"${VAR}\" expansion in %s", len(envVars), boot.EnvFile, boot.ConfigLocalPath)
+	}
+
+	cfg, err := config.Load(boot.ConfigLocalPath, envVars)
 	if err != nil {
 		return err
 	}

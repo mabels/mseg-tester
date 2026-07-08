@@ -79,6 +79,17 @@ type Bootstrap struct {
 	// UpdateSegment), so it lives with the rest of the mutable state, not
 	// with bootstrap.yaml's genuinely-static facts.
 	ConfigLocalPath string `yaml:"configLocalPath"`
+	// EnvFile is OPTIONAL -- path to a simple "KEY=VALUE" .env file
+	// (internal/envfile) used to expand "${VAR}" references anywhere in
+	// config.yaml's text (e.g. report.influx.token) before it's parsed.
+	// Defaults to "/etc/mseg-tester/.env" if empty. Written once by
+	// cloud-init, 0600, and -- like bootstrap.yaml itself -- NEVER synced
+	// via ConfigRepo: this is the one place actual secrets live on disk,
+	// kept separate from config.yaml, which may be shared or even public.
+	// Missing entirely is fine too (an env file is optional); "${VAR}"
+	// references then fall back to the real process environment, or are
+	// left untouched if that's unset as well (see envfile.Expand).
+	EnvFile string `yaml:"envFile,omitempty"`
 }
 
 const defaultPath = "/etc/mseg-tester/bootstrap.yaml"
@@ -103,6 +114,9 @@ func Load(path string) (Bootstrap, error) {
 	}
 	if b.SoftwareRef == "" {
 		b.SoftwareRef = "latest"
+	}
+	if b.EnvFile == "" {
+		b.EnvFile = "/etc/mseg-tester/.env"
 	}
 	// ConfigRepo is deliberately NOT required here -- see its doc comment
 	// above: empty means "use the plain config.yaml cloud-init already

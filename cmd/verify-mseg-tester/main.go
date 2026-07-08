@@ -126,8 +126,11 @@ func runCreate(args []string) {
 		// itself (config.Segment.Type/IfName) rather than separate
 		// -trunk-vlans/-native-segment flags -- one source of truth,
 		// nothing to keep in sync by hand. See internal/config's package
-		// doc and internal/netplan.IfaceName.
-		parsedCfg, err := config.Load(*configFile)
+		// doc and internal/netplan.IfaceName. No .env file to load here --
+		// nil still lets any "${VAR}" reference (e.g. report.influx.token)
+		// fall back to this shell's own environment, same as
+		// config.Load's doc comment describes.
+		parsedCfg, err := config.Load(*configFile, nil)
 		if err != nil {
 			log.Fatalf("verify-mseg-tester: parsing -config-file: %v", err)
 		}
