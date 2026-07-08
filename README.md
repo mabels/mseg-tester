@@ -246,9 +246,16 @@ Notes:
   NOPASSWD sudo and (if `-ssh-key-file` is given) your public key — the
   one deliberate difference from the production cloud-init, which has no
   user/SSH access at all.
+- `-console-password` (or `-console-password-file`, preferred) sets a
+  plaintext password for the `ubuntu` user, for logging in on Proxmox's
+  serial/VNC console independent of SSH — useful before SSH is even up,
+  or if you skipped `-ssh-key-file`. Leave both unset to keep the account
+  password-locked. This does **not** enable SSH password auth; SSH still
+  requires `-ssh-key-file`'s key either way.
 - `-config-token-file` (not `-config-token`) is the safe way to pass a
   private repo's PAT — the direct flag form ends up in shell history and
-  `ps` output.
+  `ps` output. The same reasoning applies to `-console-password-file`
+  over `-console-password`.
 
 ## License
 

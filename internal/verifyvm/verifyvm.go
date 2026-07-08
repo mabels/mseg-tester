@@ -96,6 +96,15 @@ type Params struct {
 	// ("test without gh"): `go install` fetches straight from
 	// SoftwareRepo's git history via the Go module proxy.
 	SoftwareRef string
+	// ConsolePassword is OPTIONAL -- a plaintext password cloud-init
+	// hashes into /etc/shadow for the "ubuntu" user, for logging in on
+	// Proxmox's serial/VNC console independent of SSH (handy before SSH
+	// is even up, or if -ssh-key-file wasn't given). Leave empty (the
+	// default) to leave the account password-locked -- console login
+	// then requires -ssh-key-file's key over SSH instead. Deliberately
+	// does NOT enable SSH password auth (ssh_pwauth is left unset): SSH
+	// still requires the key either way.
+	ConsolePassword string
 
 	// destroy-only.
 	KeepSnippets bool
@@ -137,6 +146,7 @@ func (p Params) RenderUserData() ([]byte, error) {
 		ConfigToken      string
 		SSHAuthorizedKey string
 		ConfigYAML       string
+		ConsolePassword  string
 	}{
 		Hostname:         p.Name,
 		TrunkIface:       p.TrunkIface,
@@ -150,6 +160,7 @@ func (p Params) RenderUserData() ([]byte, error) {
 		ConfigToken:      p.ConfigToken,
 		SSHAuthorizedKey: p.SSHAuthorizedKey,
 		ConfigYAML:       p.ConfigYAML,
+		ConsolePassword:  p.ConsolePassword,
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {

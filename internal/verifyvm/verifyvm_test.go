@@ -7,6 +7,44 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestRenderUserDataNoConsolePasswordLocksAccount(t *testing.T) {
+	p := Params{Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129", SoftwareRepo: "mabels/mseg-tester"}
+	out, err := p.RenderUserData()
+	if err != nil {
+		t.Fatalf("RenderUserData: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "lock_passwd: true") {
+		t.Errorf("expected lock_passwd: true with no ConsolePassword, got:\n%s", s)
+	}
+	if strings.Contains(s, "chpasswd:") {
+		t.Errorf("expected no chpasswd block with no ConsolePassword, got:\n%s", s)
+	}
+	assertValidYAML(t, out)
+}
+
+func TestRenderUserDataWithConsolePassword(t *testing.T) {
+	p := Params{
+		Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129",
+		SoftwareRepo: "mabels/mseg-tester", ConsolePassword: "hunter2",
+	}
+	out, err := p.RenderUserData()
+	if err != nil {
+		t.Fatalf("RenderUserData: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "lock_passwd: false") {
+		t.Errorf("expected lock_passwd: false with ConsolePassword set, got:\n%s", s)
+	}
+	if !strings.Contains(s, "ubuntu:hunter2") {
+		t.Errorf("expected chpasswd to set the ubuntu account's password, got:\n%s", s)
+	}
+	if strings.Contains(s, "ssh_pwauth:") {
+		t.Errorf("expected ConsolePassword to NOT enable SSH password auth, got:\n%s", s)
+	}
+	assertValidYAML(t, out)
+}
+
 func TestRenderUserDataWithoutConfigYAML(t *testing.T) {
 	p := Params{Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129", SoftwareRepo: "mabels/mseg-tester"}
 	out, err := p.RenderUserData()

@@ -100,6 +100,8 @@ func runCreate(args []string) {
 	configTokenFile := fs.String("config-token-file", "", "path to a local file containing the fine-grained PAT for config-repo, if it's private")
 	sshKeyFile := fs.String("ssh-key-file", "", "path to a local SSH public key file to authorize for the 'ubuntu' user (recommended, for inspecting the VM)")
 	fs.StringVar(&p.SoftwareRef, "module-ref", "", "git branch/tag/commit the bootstrap script's `go install` (and every later self-update) builds -software-repo from. Defaults to \"latest\" (the newest semver tag). Point at your own branch or a commit SHA to exercise unreleased code -- no GitHub release or build pipeline needed (\"test without gh\")")
+	consolePassword := fs.String("console-password", "", "plaintext password for the 'ubuntu' user, for logging in on Proxmox's serial/VNC console independent of SSH (prefer -console-password-file: this appears in argv/shell history/process list). Leave empty to leave the account password-locked -- SSH via -ssh-key-file is unaffected either way")
+	consolePasswordFile := fs.String("console-password-file", "", "path to a local file containing the plaintext console password")
 
 	yes := fs.Bool("yes", false, "actually connect to the Proxmox host and run these commands (default: print the plan only)")
 	if err := fs.Parse(args); err != nil {
@@ -133,6 +135,14 @@ func runCreate(args []string) {
 			log.Fatalf("verify-mseg-tester: reading -ssh-key-file: %v", err)
 		}
 		p.SSHAuthorizedKey = strings.TrimSpace(string(b))
+	}
+	p.ConsolePassword = *consolePassword
+	if *consolePasswordFile != "" {
+		b, err := os.ReadFile(*consolePasswordFile)
+		if err != nil {
+			log.Fatalf("verify-mseg-tester: reading -console-password-file: %v", err)
+		}
+		p.ConsolePassword = strings.TrimSpace(string(b))
 	}
 	if err := p.ValidateCreate(); err != nil {
 		log.Fatalf("verify-mseg-tester: %v", err)

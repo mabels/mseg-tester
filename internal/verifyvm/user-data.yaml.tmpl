@@ -21,10 +21,22 @@ users:
   - name: ubuntu
     sudo: ALL=(ALL) NOPASSWD:ALL
     shell: /bin/bash
-    lock_passwd: {{if .SSHAuthorizedKey}}false{{else}}true{{end}}
+    lock_passwd: {{if .ConsolePassword}}false{{else}}true{{end}}
 {{- if .SSHAuthorizedKey}}
     ssh_authorized_keys:
       - {{.SSHAuthorizedKey}}
+{{- end}}
+{{- if .ConsolePassword}}
+
+# Plaintext here is fine -- cloud-init hashes it before writing
+# /etc/shadow, it's never stored or transmitted as-is. This is for
+# logging in on Proxmox's serial/VNC console (--serial0 socket --vga
+# serial0 below), independent of SSH -- ssh_pwauth is deliberately NOT
+# set, so SSH itself still requires -ssh-key-file's key.
+chpasswd:
+  expire: false
+  list: |
+    ubuntu:{{.ConsolePassword}}
 {{- end}}
 
 write_files:
