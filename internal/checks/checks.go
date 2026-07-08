@@ -1,9 +1,11 @@
 // Package checks runs the things a segment needs to prove to pass: it
 // handed out real IPv4 and IPv6 addresses (DHCP/SLAAC already having run
 // via netplan by the time this binary starts -- checked here, not
-// performed here), its own DNS server answers over both address families
-// (and, optionally, looks like it's answering from the right region), and
-// its egress uplink actually carries traffic over both families.
+// performed here), its configured DNS record(s) resolve -- both a local
+// group (this segment's own resolver) and a remote group (the system
+// default resolver, or another server entirely), each with its own list
+// of records to test (see config.DNSCheck) -- and its egress uplink
+// actually carries traffic over both families.
 //
 // IPv6 gets equal billing with IPv4 here deliberately: this network's
 // segments are dual-stack (see network-topology.md), and OVN on this
@@ -20,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os/exec"
@@ -27,152 +30,172 @@ import (
 	"time"
 
 	"github.com/mabels/mseg-tester/internal/config"
-	"github.com/mabels/mseg-tester/internal/netplan"
+	"github.com/mabels/mseg-tester/internal/ifaces"
 	"github.com/mabels/mseg-tester/internal/state"
 )
 
 const timeout = 8 * time.Second
 
-// Run performs every check for one segment and returns them in a fixed
-// order (dhcp, dhcp6, dns, dns6 if configured, reverse if configured,
-// reverse6 if configured, geo if configured, routing, routing6 if
-// configured) -- fixed order so <segment>.result.yaml reads the same
-// shape every time, easier to diff across runs by hand.
+// Run performs every check for one segment, retrying the WHOLE batch (not
+// individual checks) up to attempts times if any single check in it
+// failed, waiting retryDelay in between -- see config.Config's
+// CheckAttemptsOrDefault/CheckRetryDelayOrDefault doc comments for why a
+// batch, not a per-check, retry. Stops as soon as one whole batch passes
+// every check; the LAST attempt's results are what's returned otherwise.
 //
-// Which interface belongs to seg -- and whether it's the trunk's
-// native/untagged VLAN or a tagged sub-interface -- comes entirely from
-// seg.Type/seg.IfName (config.yaml is the single source of truth here;
-// see netplan.IfaceName), not from any separate bootstrap-level field.
-//
-// attempts/retryDelay come from config.Config's CheckAttemptsOrDefault/
-// CheckRetryDelayOrDefault -- EVERY check below is retried independently
-// up to attempts times (stopping as soon as one passes), waiting
-// retryDelay between tries. Applies uniformly, including dhcp/dhcp6:
-// those just read already-settled interface state (network-online.target
-// already waited for it), but a retry costs nothing and guards against
-// any lingering race, not just the network-dependent checks.
-func Run(seg config.Segment, trunkInterface string, attempts int, retryDelay time.Duration) []state.CheckResult {
+// verbose, if true, logs every check's pass/fail/detail as it completes,
+// and each batch retry -- handy when watching a live console rather than
+// only reading the final <segment>.result.yaml afterward.
+func Run(seg config.Segment, attempts int, retryDelay time.Duration, verbose bool) []state.CheckResult {
 	if attempts <= 0 {
 		attempts = 1
 	}
-	results := []state.CheckResult{
-		withRetry(attempts, retryDelay, func() state.CheckResult { return dhcpCheck(seg, trunkInterface) }),
-		withRetry(attempts, retryDelay, func() state.CheckResult { return dhcp6Check(seg, trunkInterface) }),
-		withRetry(attempts, retryDelay, func() state.CheckResult { return dnsCheck(seg) }),
-	}
-	if seg.DNSServer6 != "" {
-		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return dns6Check(seg) }))
-	}
-	if seg.ReverseCheck != nil {
-		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return reverseCheck(seg) }))
-	}
-	if seg.ReverseCheck6 != nil && seg.DNSServer6 != "" {
-		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return reverse6Check(seg) }))
-	}
-	if seg.GeoCheck != nil {
-		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return geoCheck(seg) }))
-	}
-	results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return routingCheck(seg) }))
-	if seg.RoutingCheck6 != "" {
-		results = append(results, withRetry(attempts, retryDelay, func() state.CheckResult { return routing6Check(seg) }))
+	var results []state.CheckResult
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if verbose && attempt > 1 {
+			log.Printf("checks: segment %s: attempt %d/%d", seg.Name, attempt, attempts)
+		}
+		results = runOnceFn(seg, verbose)
+		if allPass(results) {
+			return results
+		}
+		if attempt < attempts {
+			if verbose {
+				log.Printf("checks: segment %s: attempt %d/%d had a failure, waiting %s before re-running every check",
+					seg.Name, attempt, attempts, retryDelay)
+			}
+			time.Sleep(retryDelay)
+		}
 	}
 	return results
 }
 
-// withRetry calls fn up to attempts times, stopping as soon as one
-// attempt passes. On a check that never passes, the last failing
-// result's Detail gets the attempt count appended, so
-// <segment>.result.yaml distinguishes "failed once" from "failed after
-// every retry" without needing a separate field.
-func withRetry(attempts int, delay time.Duration, fn func() state.CheckResult) state.CheckResult {
-	var last state.CheckResult
-	for i := 1; i <= attempts; i++ {
-		last = fn()
-		if last.Pass {
-			return last
-		}
-		if i < attempts {
-			time.Sleep(delay)
+// allPass reports whether every check in results passed.
+func allPass(results []state.CheckResult) bool {
+	for _, r := range results {
+		if !r.Pass {
+			return false
 		}
 	}
-	if attempts > 1 {
-		last.Detail = fmt.Sprintf("%s (failed all %d attempts)", last.Detail, attempts)
+	return true
+}
+
+// runOnceFn is a var, not a plain function call, so tests can fake a
+// whole attempt's outcome (pass/fail) without needing a real interface,
+// DNS server, or network reachability -- same seam pattern as
+// internal/selfupdate's goInstall var.
+var runOnceFn = runOnce
+
+// runOnce runs every check for seg exactly once, in a fixed order (so
+// <segment>.result.yaml reads the same shape every time, easier to diff
+// across runs by hand): dhcp, dhcp6, every configured DNSCheck
+// local/remote group (see dnsChecks), reverse/reverse6 if configured, geo
+// if configured, routing, routing6 if configured.
+func runOnce(seg config.Segment, verbose bool) []state.CheckResult {
+	logged := func(r state.CheckResult) state.CheckResult {
+		if verbose {
+			status := "FAIL"
+			if r.Pass {
+				status = "PASS"
+			}
+			log.Printf("checks: %-16s %s  %s", r.Name, status, r.Detail)
+		}
+		return r
 	}
-	return last
+
+	iface, ifaceErr := discoverIface(seg)
+
+	results := []state.CheckResult{
+		logged(dhcpCheck(iface, ifaceErr)),
+		logged(dhcp6Check(iface, ifaceErr)),
+	}
+	for _, r := range dnsChecks(seg) {
+		results = append(results, logged(r))
+	}
+	if seg.ReverseCheck != nil {
+		results = append(results, logged(reverseCheck(seg)))
+	}
+	if seg.ReverseCheck6 != nil && seg.DNSServer6 != "" {
+		results = append(results, logged(reverse6Check(seg)))
+	}
+	if seg.GeoCheck != nil {
+		results = append(results, logged(geoCheck(seg)))
+	}
+	results = append(results, logged(routingCheck(seg)))
+	if seg.RoutingCheck6 != "" {
+		results = append(results, logged(routing6Check(seg)))
+	}
+	return results
+}
+
+// discoverIface finds seg's real, currently-running interface via
+// internal/ifaces -- a fresh `ip a` snapshot taken once per attempt and
+// shared by dhcpCheck/dhcp6Check, rather than assuming a name from
+// config. A failure here (couldn't even list interfaces) is carried into
+// both dhcp/dhcp6 as their own failing result -- everything else below
+// doesn't depend on it.
+func discoverIface(seg config.Segment) (ifaces.Iface, error) {
+	list, err := ifaces.List()
+	if err != nil {
+		return ifaces.Iface{}, err
+	}
+	return ifaces.Find(list, seg)
 }
 
 // dhcpCheck doesn't send its own DHCPDISCOVER -- netplan/systemd-networkd
 // already did that before this binary was invoked (see the systemd unit's
 // After=network-online.target). What's actually being confirmed here is
-// the OUTCOME: does this segment's interface (a tagged VLAN sub-interface,
-// or the trunk interface itself if this IS the native segment -- see
-// netplan.IfaceName) have a real, non-link-local IPv4 address bound to
-// it. That's the observable proof DHCP succeeded, without this tool
-// needing to re-implement a DHCP client itself just to double-check one
-// already run. Detail also reports the IPv4 default gateway learned via
-// that interface, if any (defaultGateway) -- best-effort, never fails
-// the check by itself.
-func dhcpCheck(seg config.Segment, trunkInterface string) state.CheckResult {
+// the OUTCOME: does seg's real interface (discovered by internal/ifaces,
+// not assumed from a naming convention) have a real, non-link-local IPv4
+// address bound to it. Detail also reports the IPv4 default gateway
+// learned via that interface, if any (defaultGateway) -- best-effort,
+// never fails the check by itself.
+func dhcpCheck(iface ifaces.Iface, ifaceErr error) state.CheckResult {
 	name := "dhcp"
-	ifaceName := netplan.IfaceName(trunkInterface, seg)
-	iface, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("interface %s: %v", ifaceName, err)}
+	if ifaceErr != nil {
+		return state.CheckResult{Name: name, Pass: false, Detail: ifaceErr.Error()}
 	}
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("reading addrs on %s: %v", ifaceName, err)}
-	}
-	for _, a := range addrs {
-		ipNet, ok := a.(*net.IPNet)
-		if !ok || ipNet.IP.To4() == nil || ipNet.IP.IsLinkLocalUnicast() {
+	for _, a := range iface.Addrs {
+		if a.IP == nil || a.IP.To4() == nil || a.IP.IsLinkLocalUnicast() {
 			continue
 		}
-		detail := ipNet.IP.String()
-		if gw := defaultGateway(ifaceName, false); gw != "" {
+		detail := a.IP.String()
+		if gw := defaultGateway(iface.Name, false); gw != "" {
 			detail = fmt.Sprintf("%s (gw %s)", detail, gw)
 		}
 		return state.CheckResult{Name: name, Pass: true, Detail: detail}
 	}
-	return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("no non-link-local IPv4 address on %s", ifaceName)}
+	return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("no non-link-local IPv4 address on %s", iface.Name)}
 }
 
-// dhcp6Check is dhcpCheck's IPv6 counterpart: confirms the same VLAN
-// sub-interface also picked up at least one global (non-link-local) IPv6
-// address, via SLAAC. Unconditional and needs no per-segment config,
-// exactly like dhcpCheck -- just interface state. See the package doc for
-// why this is also, incidentally, a live regression check for OVN's
-// solicited-RA-only behavior on this network. Detail lists EVERY global
-// address found (SLAAC can hand out more than one, e.g. a stable address
-// alongside an RFC 4941 privacy/temporary one) plus the IPv6 default
-// gateway learned via that interface, if any (defaultGateway).
-func dhcp6Check(seg config.Segment, trunkInterface string) state.CheckResult {
+// dhcp6Check is dhcpCheck's IPv6 counterpart: confirms seg's real
+// interface also picked up at least one global (non-link-local) IPv6
+// address, via SLAAC. See the package doc for why this is also,
+// incidentally, a live regression check for OVN's solicited-RA-only
+// behavior on this network. Detail lists EVERY global address found
+// (SLAAC can hand out more than one, e.g. a stable address alongside an
+// RFC 4941 privacy/temporary one) plus the IPv6 default gateway learned
+// via that interface, if any (defaultGateway).
+func dhcp6Check(iface ifaces.Iface, ifaceErr error) state.CheckResult {
 	name := "dhcp6"
-	ifaceName := netplan.IfaceName(trunkInterface, seg)
-	iface, err := net.InterfaceByName(ifaceName)
-	if err != nil {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("interface %s: %v", ifaceName, err)}
-	}
-	addrs, err := iface.Addrs()
-	if err != nil {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("reading addrs on %s: %v", ifaceName, err)}
+	if ifaceErr != nil {
+		return state.CheckResult{Name: name, Pass: false, Detail: ifaceErr.Error()}
 	}
 	var globals []string
-	for _, a := range addrs {
-		ipNet, ok := a.(*net.IPNet)
-		if !ok || ipNet.IP.To4() != nil || ipNet.IP.IsLinkLocalUnicast() {
+	for _, a := range iface.Addrs {
+		if a.IP == nil || a.IP.To4() != nil || a.IP.IsLinkLocalUnicast() {
 			continue
 		}
-		globals = append(globals, ipNet.IP.String())
+		globals = append(globals, a.IP.String())
 	}
 	if len(globals) == 0 {
 		return state.CheckResult{
 			Name: name, Pass: false,
-			Detail: fmt.Sprintf("no global IPv6 address on %s (SLAAC via solicited RA may not have completed)", ifaceName),
+			Detail: fmt.Sprintf("no global IPv6 address on %s (SLAAC via solicited RA may not have completed)", iface.Name),
 		}
 	}
 	detail := strings.Join(globals, ",")
-	if gw := defaultGateway(ifaceName, true); gw != "" {
+	if gw := defaultGateway(iface.Name, true); gw != "" {
 		detail = fmt.Sprintf("%s (gw %s)", detail, gw)
 	}
 	return state.CheckResult{Name: name, Pass: true, Detail: detail}
@@ -202,70 +225,108 @@ func defaultGateway(iface string, ipv6 bool) string {
 	return ""
 }
 
-// dnsCheck resolves DNSCheck directly against this segment's own resolver
-// (not the system resolver -- deliberately bypassing /etc/resolv.conf so
-// this proves THIS segment's DNS server specifically answered, regardless
-// of what else the OS might fall back to).
-func dnsCheck(seg config.Segment) state.CheckResult {
-	name := "dns"
-	resolver := &net.Resolver{
+// resolverVia builds a *net.Resolver that dials server (port 53)
+// directly -- deliberately bypassing /etc/resolv.conf and the system
+// resolver, so a lookup through it proves THIS specific server answered,
+// not whatever else the OS might fall back to. Used whenever a
+// config.DNSCheckGroup names a specific Server (or, for the local group,
+// whenever Segment.DNSServer/DNSServer6 supply the default) -- the
+// remote group's default instead uses net.DefaultResolver directly (see
+// dnsChecks).
+func resolverVia(server string) *net.Resolver {
+	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			d := net.Dialer{Timeout: timeout}
-			return d.DialContext(ctx, network, net.JoinHostPort(seg.DNSServer, "53"))
+			return d.DialContext(ctx, network, net.JoinHostPort(server, "53"))
 		},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	addrs, err := resolver.LookupHost(ctx, seg.DNSCheck)
-	if err != nil {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: %v", seg.DNSCheck, seg.DNSServer, err)}
-	}
-	if len(addrs) == 0 {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: no answers", seg.DNSCheck, seg.DNSServer)}
-	}
-	return state.CheckResult{Name: name, Pass: true, Detail: strings.Join(addrs, ",")}
 }
 
-// dns6Check mirrors dnsCheck but reaches this segment's resolver over
-// IPv6 (net.JoinHostPort brackets the address automatically, same as any
-// IPv6 literal) -- only run when DNSServer6 is configured.
-func dns6Check(seg config.Segment) state.CheckResult {
-	name := "dns6"
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: timeout}
-			return d.DialContext(ctx, network, net.JoinHostPort(seg.DNSServer6, "53"))
-		},
-	}
+// dnsLookup resolves fqdn via resolver and turns the outcome into a
+// state.CheckResult named name -- the one building block shared by every
+// dns-* check below.
+func dnsLookup(name, fqdn, via string, resolver *net.Resolver) state.CheckResult {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	addrs, err := resolver.LookupHost(ctx, seg.DNSCheck)
+	addrs, err := resolver.LookupHost(ctx, fqdn)
 	if err != nil {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: %v", seg.DNSCheck, seg.DNSServer6, err)}
+		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: %v", fqdn, via, err)}
 	}
 	if len(addrs) == 0 {
-		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: no answers", seg.DNSCheck, seg.DNSServer6)}
+		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: no answers", fqdn, via)}
 	}
-	return state.CheckResult{Name: name, Pass: true, Detail: strings.Join(addrs, ",")}
+	return state.CheckResult{Name: name, Pass: true, Detail: fmt.Sprintf("%s -> %s", fqdn, strings.Join(addrs, ","))}
+}
+
+// dnsChecks runs seg.DNSCheck's Local and/or Remote groups (either or
+// both may be nil -- see config.DNSCheck) and returns one state.CheckResult
+// per (group, family, test) combination.
+func dnsChecks(seg config.Segment) []state.CheckResult {
+	if seg.DNSCheck == nil {
+		return nil
+	}
+	var results []state.CheckResult
+	if seg.DNSCheck.Local != nil {
+		results = append(results, localDNSGroupChecks(seg, seg.DNSCheck.Local)...)
+	}
+	if seg.DNSCheck.Remote != nil {
+		results = append(results, remoteDNSGroupChecks(seg.DNSCheck.Remote)...)
+	}
+	return results
+}
+
+// localDNSGroupChecks runs group.Tests against group.Server if set, or
+// otherwise against BOTH of seg's own resolver addresses (DNSServer over
+// IPv4, and DNSServer6 over IPv6 too if that's configured) -- see
+// config.DNSCheckGroup's doc comment.
+func localDNSGroupChecks(seg config.Segment, group *config.DNSCheckGroup) []state.CheckResult {
+	if group.Server != "" {
+		resolver := resolverVia(group.Server)
+		var results []state.CheckResult
+		for _, fqdn := range group.Tests {
+			results = append(results, dnsLookup(fmt.Sprintf("dns-local:%s", fqdn), fqdn, group.Server, resolver))
+		}
+		return results
+	}
+	var results []state.CheckResult
+	v4 := resolverVia(seg.DNSServer)
+	for _, fqdn := range group.Tests {
+		results = append(results, dnsLookup(fmt.Sprintf("dns-local-ipv4:%s", fqdn), fqdn, seg.DNSServer, v4))
+	}
+	if seg.DNSServer6 != "" {
+		v6 := resolverVia(seg.DNSServer6)
+		for _, fqdn := range group.Tests {
+			results = append(results, dnsLookup(fmt.Sprintf("dns-local-ipv6:%s", fqdn), fqdn, seg.DNSServer6, v6))
+		}
+	}
+	return results
+}
+
+// remoteDNSGroupChecks runs group.Tests against group.Server if set, or
+// otherwise the system's default resolver (whatever /etc/resolv.conf
+// points at) -- see config.DNSCheckGroup's doc comment.
+func remoteDNSGroupChecks(group *config.DNSCheckGroup) []state.CheckResult {
+	resolver, via := net.DefaultResolver, "the system default resolver"
+	if group.Server != "" {
+		resolver, via = resolverVia(group.Server), group.Server
+	}
+	var results []state.CheckResult
+	for _, fqdn := range group.Tests {
+		results = append(results, dnsLookup(fmt.Sprintf("dns-remote:%s", fqdn), fqdn, via, resolver))
+	}
+	return results
 }
 
 // reverseCheck confirms ReverseCheck.IP reverse-resolves (PTR) to
 // ReverseCheck.Expect against this segment's own resolver (DNSServer,
 // same "bypass /etc/resolv.conf, ask THIS segment's server specifically"
-// reasoning as dnsCheck). A resolver can answer forward queries fine
-// while its PTR zone is stale or wrong, so this is a genuinely distinct
-// failure mode from dnsCheck, not just a formality.
+// reasoning as the dns-local-* checks). A resolver can answer forward
+// queries fine while its PTR zone is stale or wrong, so this is a
+// genuinely distinct failure mode, not just a formality.
 func reverseCheck(seg config.Segment) state.CheckResult {
 	name := "reverse"
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: timeout}
-			return d.DialContext(ctx, network, net.JoinHostPort(seg.DNSServer, "53"))
-		},
-	}
+	resolver := resolverVia(seg.DNSServer)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	names, err := resolver.LookupAddr(ctx, seg.ReverseCheck.IP)
@@ -294,13 +355,7 @@ func reverseCheck(seg config.Segment) state.CheckResult {
 // gateway/host address.
 func reverse6Check(seg config.Segment) state.CheckResult {
 	name := "reverse6"
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: timeout}
-			return d.DialContext(ctx, network, net.JoinHostPort(seg.DNSServer6, "53"))
-		},
-	}
+	resolver := resolverVia(seg.DNSServer6)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	names, err := resolver.LookupAddr(ctx, seg.ReverseCheck6.IP)

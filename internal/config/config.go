@@ -44,6 +44,36 @@ type ReverseCheck struct {
 	Expect string `yaml:"expect"`
 }
 
+// DNSCheckGroup is one named group of forward-DNS lookups to run
+// together -- see DNSCheck and internal/checks.
+type DNSCheckGroup struct {
+	// Server is OPTIONAL and means something different in each group:
+	//   - Local group: leave empty to query BOTH of this segment's own
+	//     resolver addresses (Segment.DNSServer over IPv4, and
+	//     Segment.DNSServer6 over IPv6 too if that's set) -- every test
+	//     below is then run against each family in turn. Set Server to
+	//     query only that one specific address instead.
+	//   - Remote group: leave empty to use the SYSTEM's default resolver
+	//     (whatever /etc/resolv.conf points at -- normally this segment's
+	//     own resolver too, via DHCP) -- proving plain, unconfigured
+	//     resolution works. Set Server to dial a specific address instead
+	//     (e.g. a public resolver like "1.1.1.1").
+	Server string `yaml:"server,omitempty"`
+	// Tests is every FQDN to resolve in this group, e.g. a segment's own
+	// record alongside a public internet one, to prove the resolver also
+	// forwards upstream and not just answers its own local zone.
+	Tests []string `yaml:"tests"`
+}
+
+// DNSCheck is a segment's forward-DNS test configuration -- Local and
+// Remote are each optional (nil skips that group entirely), so a segment
+// can run either, both, or neither. See DNSCheckGroup for what "local"
+// and "remote" mean for Server's default.
+type DNSCheck struct {
+	Local  *DNSCheckGroup `yaml:"local,omitempty"`
+	Remote *DNSCheckGroup `yaml:"remote,omitempty"`
+}
+
 // Segment is one entry in the cycle -- everything needed to configure
 // netplan for it and to check it once it's up.
 type Segment struct {
@@ -69,25 +99,27 @@ type Segment struct {
 	// for a tagged one). Only needed if your naming convention differs.
 	IfName string `yaml:"ifname,omitempty"`
 	// DNSServer is the segment-local resolver to query directly (its
-	// own Technitium instance, typically <subnet>.5).
+	// own Technitium instance, typically <subnet>.5) -- also DNSCheck's
+	// Local group's default server over IPv4 when that group doesn't
+	// override Server itself.
 	DNSServer string `yaml:"dnsServer"`
-	// DNSCheck is a record expected to resolve against DNSServer --
-	// confirms the resolver itself is answering, independent of
-	// upstream/internet reachability.
-	DNSCheck string `yaml:"dnsCheck"`
 	// DNSServer6 is OPTIONAL -- the same resolver's IPv6 address (e.g.
 	// "fd00:192:168:129::5", the convention this project's other
 	// cloud-init files already use for their own IPv6 nameserver entries
-	// -- plain address, no brackets, same style as DNSServer). The
-	// "dns6" check (the same DNSCheck record, reached over IPv6) is
-	// skipped when this is empty.
+	// -- plain address, no brackets, same style as DNSServer). Also
+	// DNSCheck's Local group's default server over IPv6 -- skipped
+	// (like ReverseCheck6) when this is empty.
 	DNSServer6 string `yaml:"dnsServer6,omitempty"`
+	// DNSCheck configures this segment's forward-DNS tests -- see
+	// DNSCheck/DNSCheckGroup above and internal/checks. Optional: nil
+	// runs no forward-DNS checks at all for this segment.
+	DNSCheck *DNSCheck `yaml:"dnsCheck,omitempty"`
 	// ReverseCheck is OPTIONAL -- see ReverseCheck above. Queried against
 	// DNSServer (IPv4 transport). Nil skips the "reverse" check.
 	ReverseCheck *ReverseCheck `yaml:"reverseCheck,omitempty"`
 	// ReverseCheck6 is OPTIONAL -- ReverseCheck's IPv6 counterpart,
-	// queried against DNSServer6. Skipped (like "dns6") when DNSServer6
-	// is empty, even if this is set.
+	// queried against DNSServer6. Skipped when DNSServer6 is empty, even
+	// if this is set.
 	ReverseCheck6 *ReverseCheck `yaml:"reverseCheck6,omitempty"`
 	// GeoCheck is optional -- see GeoCheck above. Nil skips it.
 	GeoCheck *GeoCheck `yaml:"geoCheck,omitempty"`
@@ -127,16 +159,21 @@ type Config struct {
 	// segment. Empty/zero means updateSegment reboots immediately too. A
 	// Go duration string (time.ParseDuration).
 	RebootDelay string `yaml:"rebootDelay,omitempty"`
-	// CheckAttempts is how many times to try EACH check (dhcp, dns,
-	// reverse, geo, routing, ...) before giving up on it -- defaults to 3
-	// if zero/unset. Stops retrying as soon as one attempt passes; a
-	// check that never passes reports its last failing attempt, with the
-	// total attempt count appended to Detail.
+	// CheckAttempts is how many times to run the WHOLE batch of checks
+	// (dhcp, dhcp6, every dns pass, reverse, geo, routing, ...) before
+	// giving up -- defaults to 3 if zero/unset. If ANY check in a batch
+	// fails, the entire batch is re-run from scratch after CheckRetryDelay
+	// (not just the failing check -- a single bad attempt is retried as a
+	// whole, since check results are more meaningful read together than
+	// individually re-run at different points in time). Stops as soon as
+	// one whole batch passes every check; if every attempt still has a
+	// failure, the LAST attempt's results are what's recorded.
 	CheckAttempts int `yaml:"checkAttempts,omitempty"`
-	// CheckRetryDelay is how long to wait between attempts of the SAME
-	// check -- defaults to "10s" if empty. A Go duration string. Has
-	// nothing to do with RebootDelay (that's once per cycle, on
-	// updateSegment only; this is per-check, on every segment).
+	// CheckRetryDelay is how long to wait before re-running the whole
+	// batch of checks after any one of them failed -- defaults to "10s"
+	// if empty. A Go duration string. Has nothing to do with RebootDelay
+	// (that's once per cycle, on updateSegment only; this is per checks
+	// batch, on every segment).
 	CheckRetryDelay string    `yaml:"checkRetryDelay,omitempty"`
 	Report          *Report   `yaml:"report,omitempty"`
 	Segments        []Segment `yaml:"segments"`

@@ -43,11 +43,14 @@ test every cycle, entirely self-contained inside the guest.
 
 ## How a cycle works
 
-Every check below (`dhcp`/`dhcp6`/`dns`/`dns6`/`reverse`/`reverse6`/`geo`/
-`routing`/`routing6`) is retried independently on failure — up to
-`config.yaml`'s `checkAttempts` times (default 3), waiting
-`checkRetryDelay` between tries (default `10s`), stopping as soon as one
-attempt passes.
+Every check below runs as one batch. If ANY check in the batch fails, the
+WHOLE batch — not just the failing check — is re-run from scratch after
+`config.yaml`'s `checkRetryDelay` (default `10s`), up to `checkAttempts`
+times (default 3) total; the batch stops retrying as soon as one full
+attempt passes every check, and the LAST attempt's results are what get
+recorded if every attempt still had a failure. Pass `mseg-tester run
+-verbose` to log each step and each check's pass/fail/detail as it
+happens, not just the final summary.
 
 1. Read `/mseg-tester/active.yaml` — which segment is active right now.
 2. **Only if** the active segment is `updateSegment` AND `bootstrap.yaml`'s
@@ -55,26 +58,47 @@ attempt passes.
    (best-effort — a failed fetch just leaves the last successfully-synced,
    or cloud-init-provisioned, `config.yaml` in place). Skipped entirely
    when `configRepo` is empty.
-3. Confirm the VLAN sub-interface for that segment actually has a
-   non-link-local IPv4 address, **and** a global (non-link-local) IPv6
-   address (`dhcp`/`dhcp6` — DHCP/SLAAC already ran via netplan before
-   this binary starts, see the systemd unit's
-   `After=network-online.target`; this step confirms the *outcome*, it
-   doesn't run its own DHCP client or send its own router solicitation).
-   Both checks also record, best-effort, the interface's default gateway
-   (`ip route show default`, IPv4 and IPv6 separately) and, for `dhcp6`,
-   every SLAAC-assigned global IPv6 address seen (not just the first) —
-   all appended to the check's `Detail`, purely informational, never
-   fails the check on their own.
-4. Resolve a configured record directly against that segment's own DNS
-   server over IPv4 (`dns`), and over IPv6 too if `dnsServer6` is set
-   (`dns6`) — then, if `reverseCheck`/`reverseCheck6` are set, confirm
-   that same server also answers PTR queries correctly (`reverse`,
-   `reverse6`; a resolver's forward zone can be fine while its PTR zone
-   is stale or wrong, so this is a genuinely separate failure mode) —
-   and, for segments expected to exit through a specific region (a
-   WireGuard tunnel), fetch a geo-IP echo URL and confirm the response
-   mentions the right country (`geo`).
+3. Discover which real interface is carrying this segment's traffic by
+   running `ip a` and parsing its output (`internal/ifaces`) — not by
+   assuming a name from config: mseg-tester's own netplan never brings up
+   more than "lo", the trunk NIC, and (only for a tagged VLAN segment)
+   one VLAN sub-interface at a time, so "whichever non-loopback interface
+   is actually the right one" is discoverable without trusting any naming
+   convention. Then confirm that interface actually has a non-link-local
+   IPv4 address, **and** a global (non-link-local) IPv6 address
+   (`dhcp`/`dhcp6` — DHCP/SLAAC already ran via netplan before this binary
+   starts, see the systemd unit's `After=network-online.target`; this
+   step confirms the *outcome*, it doesn't run its own DHCP client or
+   send its own router solicitation). Both checks also record,
+   best-effort, the interface's default gateway (`ip route show
+   default`, IPv4 and IPv6 separately) and, for `dhcp6`, every
+   SLAAC-assigned global IPv6 address seen (not just the first) — all
+   appended to the check's `Detail`, purely informational, never fails
+   the check on their own.
+4. Run `dnsCheck`'s `local` and/or `remote` groups, whichever are set —
+   each is just a list of records to resolve (`tests`), with an optional
+   `server` override:
+   - `local` (no `server` set): resolves every test against BOTH of this
+     segment's own resolver addresses, `dnsServer` (IPv4) and `dnsServer6`
+     (IPv6, if set) — proves the resolver answers for its own zone, over
+     both families.
+   - `remote` (no `server` set): resolves every test via the system's
+     default resolver (whatever `/etc/resolv.conf` points at, normally
+     this segment's own resolver too via DHCP) — proves plain,
+     unconfigured resolution works, and — since `remote`'s `tests` is
+     typically a public record like `google.com.` — that the resolver
+     also forwards upstream, not just answers its own local zone.
+   - Set `server` on either group to query one specific address instead
+     of the defaults above (e.g. a public resolver like `1.1.1.1` for
+     `remote`).
+
+   Then, if `reverseCheck`/`reverseCheck6` are set, confirm that same
+   server also answers PTR queries correctly (`reverse`, `reverse6`; a
+   resolver's forward zone can be fine while its PTR zone is stale or
+   wrong, so this is a genuinely separate failure mode) — and, for
+   segments expected to exit through a specific region (a WireGuard
+   tunnel), fetch a geo-IP echo URL and confirm the response mentions the
+   right country (`geo`).
 5. Confirm plain TCP reachability to a known external address over IPv4
    (`routing`), and over IPv6 too if `routingCheck6` is set (`routing6`)
    — proves the segment's actual egress uplink carries traffic, not just
@@ -161,7 +185,7 @@ at all.
 | Command | When it runs | What it does |
 |---|---|---|
 | `mseg-tester deploy` | Once, from the cloud-init bootstrap script, after the binary is first downloaded | Copies itself to `/usr/local/bin`, writes and enables the systemd unit (`internal/deploy`) |
-| `mseg-tester run [--bootstrap path] [--no-reboot]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/etc/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting |
+| `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/etc/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
 
 ## `bootstrap.yaml` reference (`/etc/mseg-tester/bootstrap.yaml`)
 
@@ -186,14 +210,15 @@ Which segment (if any) is this trunk's native/untagged VLAN is declared in
 | Field | Meaning |
 |---|---|
 | `rebootDelay` | Optional Go duration (e.g. `"6m"`) to wait, only on `updateSegment`, before rebooting into the next segment. Every other segment always reboots immediately. Omit for immediate everywhere |
-| `checkAttempts` | Optional. How many times to try EACH check before giving up on it — stops as soon as one attempt passes. Defaults to `3` if omitted |
-| `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait between attempts of the same check. Defaults to `"10s"` if omitted |
+| `checkAttempts` | Optional. How many times to run the WHOLE batch of checks before giving up — if ANY check fails, the whole batch (not just that check) is re-run. Stops as soon as one full attempt passes every check. Defaults to `3` if omitted |
+| `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait before re-running the whole batch after a failure. Defaults to `"10s"` if omitted |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether the segment becomes Proxmox `net0`'s `tag=` or `trunks=` — the single source of truth for "which segment is native" |
 | `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |
-| `segments[].dnsServer` / `.dnsCheck` | Resolver to query (IPv4), record expected to resolve |
-| `segments[].dnsServer6` | Optional. Same resolver's IPv6 address, e.g. `fd00:192:168:129::5` — runs the same `dnsCheck` record over IPv6 (`dns6`); omit to skip |
+| `segments[].dnsServer` / `.dnsServer6` | This segment's own resolver, IPv4 and (optional) IPv6. Also `dnsCheck.local`'s default server(s) — see below — and what `reverseCheck`/`reverseCheck6` query |
+| `segments[].dnsCheck.local` | Optional `{server?, tests[]}` — resolves every FQDN in `tests` against `server` if set, or otherwise BOTH `dnsServer` and `dnsServer6` (if set) — proves this segment's own resolver answers, over whichever families you configured |
+| `segments[].dnsCheck.remote` | Optional `{server?, tests[]}` — resolves every FQDN in `tests` against `server` if set, or otherwise the system's default resolver — put a public record here (e.g. `google.com.`) to prove the resolver also forwards upstream, not just answers its own zone |
 | `segments[].reverseCheck` | Optional `{ip, expect}` — confirms `dnsServer` also answers a PTR query for `ip` with `expect` (`reverse`); omit to skip |
 | `segments[].reverseCheck6` | Optional `{ip, expect}` — `reverseCheck`'s IPv6 counterpart, queried against `dnsServer6` (`reverse6`); skipped if `dnsServer6` is empty even when this is set |
 | `segments[].geoCheck` | Optional `{url, expect}` — omit to skip |

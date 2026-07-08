@@ -19,7 +19,9 @@
 //	                          3. checks the active segment (DHCP address
 //	                             present, DNS answers, optionally a geo
 //	                             check, plain routing reachability -- see
-//	                             internal/checks),
+//	                             internal/checks), retrying the WHOLE batch
+//	                             up to config.CheckAttempts times if any
+//	                             single check in it failed,
 //	                          4. records the result,
 //	                          5. on the update segment: rebuilds itself via
 //	                             `go install` straight from source and
@@ -29,6 +31,11 @@
 //	                             config.Report.URL if set (internal/report),
 //	                          6. writes netplan for the NEXT segment in the
 //	                             cycle, waits config.RebootDelay, reboots.
+//
+//	-verbose logs each of the above steps, and every individual check's
+//	pass/fail/detail, as they happen -- handy when watching a live serial
+//	console rather than only reading the final <segment>.result.yaml
+//	afterward.
 //
 // Two configuration files, split by how often each changes -- see the
 // package docs on internal/bootstrap and internal/config for why:
@@ -84,17 +91,22 @@ func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	bootstrapPath := fs.String("bootstrap", "/etc/mseg-tester/bootstrap.yaml", "path to bootstrap.yaml")
 	noReboot := fs.Bool("no-reboot", false, "run one pass and print the result instead of rebooting (manual testing)")
+	verbose := fs.Bool("verbose", false, "log every step and every check's pass/fail/detail as it happens, not just the final summary -- handy when watching a live console")
 	_ = fs.Parse(args)
 
-	if err := run(*bootstrapPath, *noReboot); err != nil {
+	if err := run(*bootstrapPath, *noReboot, *verbose); err != nil {
 		log.Fatalf("mseg-tester: %v", err)
 	}
 }
 
-func run(bootstrapPath string, noReboot bool) error {
+func run(bootstrapPath string, noReboot, verbose bool) error {
 	boot, err := bootstrap.Load(bootstrapPath)
 	if err != nil {
 		return err
+	}
+	if verbose {
+		log.Printf("run: bootstrap loaded from %s: trunkInterface=%s updateSegment=%s softwareRepo=%s",
+			bootstrapPath, boot.TrunkInterface, boot.UpdateSegment, boot.SoftwareRepo)
 	}
 
 	active, err := state.LoadActive(boot.StateDir)
@@ -110,6 +122,9 @@ func run(bootstrapPath string, noReboot bool) error {
 		firstBoot = true
 		active = state.Active{Segment: boot.UpdateSegment}
 	}
+	if verbose {
+		log.Printf("run: active segment=%s firstBoot=%v", active.Segment, firstBoot)
+	}
 
 	// Config-sync (like self-update and reporting below) is only ever
 	// attempted from boot.UpdateSegment -- every other segment has no
@@ -121,6 +136,9 @@ func run(bootstrapPath string, noReboot bool) error {
 	// config.yaml is already on disk (from a previous successful sync,
 	// or the one cloud-init provisioned) is left in place.
 	if active.Segment == boot.UpdateSegment && boot.ConfigRepo != "" {
+		if verbose {
+			log.Printf("run: syncing config.yaml from %s", boot.ConfigRepo)
+		}
 		if err := configsync.Fetch(boot); err != nil {
 			log.Printf("mseg-tester: config sync: %v", err)
 		}
@@ -153,15 +171,19 @@ func run(bootstrapPath string, noReboot bool) error {
 		log.Printf("mseg-tester: reading current version: %v", verErr)
 	}
 
+	attempts, retryDelay := cfg.CheckAttemptsOrDefault(), cfg.CheckRetryDelayOrDefault()
+	if verbose {
+		log.Printf("run: checking segment %s (checkAttempts=%d checkRetryDelay=%s)", seg.Name, attempts, retryDelay)
+	}
 	result := state.Result{
 		Segment:   seg.Name,
 		Timestamp: time.Now().UTC(),
-		Checks:    checks.Run(seg, boot.TrunkInterface, cfg.CheckAttemptsOrDefault(), cfg.CheckRetryDelayOrDefault()),
+		Checks:    checks.Run(seg, attempts, retryDelay, verbose),
 		Version:   currentVersion,
 	}
 
 	if active.Segment == boot.UpdateSegment {
-		applyUpdateCheck(boot, &result)
+		applyUpdateCheck(boot, &result, verbose)
 	}
 
 	if err := state.SaveResult(boot.StateDir, result); err != nil {
@@ -169,6 +191,9 @@ func run(bootstrapPath string, noReboot bool) error {
 	}
 
 	if active.Segment == boot.UpdateSegment && cfg.Report != nil && cfg.Report.URL != "" {
+		if verbose {
+			log.Printf("run: pushing accumulated results to %s", cfg.Report.URL)
+		}
 		if err := report.Push(cfg.Report.URL, boot.StateDir); err != nil {
 			log.Printf("mseg-tester: report push: %v", err)
 		}
@@ -178,6 +203,9 @@ func run(bootstrapPath string, noReboot bool) error {
 	nextSeg, ok := cfg.BySegmentName(next)
 	if !ok {
 		return fmt.Errorf("next segment %q not declared in %s", next, boot.ConfigLocalPath)
+	}
+	if verbose {
+		log.Printf("run: writing netplan for next segment %s", next)
 	}
 	if err := netplan.Write(boot.TrunkInterface, nextSeg); err != nil {
 		return fmt.Errorf("writing netplan for next segment %s: %w", next, err)
@@ -200,8 +228,15 @@ func run(bootstrapPath string, noReboot bool) error {
 	// count for no reason.
 	if active.Segment == boot.UpdateSegment {
 		if delay := cfg.RebootDelayDuration(); delay > 0 {
+			if verbose {
+				log.Printf("run: sleeping %s before reboot (rebootDelay, updateSegment only)", delay)
+			}
 			time.Sleep(delay)
 		}
+	}
+
+	if verbose {
+		log.Printf("run: rebooting into segment %s", next)
 	}
 
 	// A self-update above may have just replaced this executable on
@@ -218,8 +253,11 @@ func run(bootstrapPath string, noReboot bool) error {
 // DHCP/DNS/routing results are still valid and still worth keeping, and
 // missing one update just means trying again next time this segment
 // comes back around in the cycle.
-func applyUpdateCheck(boot bootstrap.Bootstrap, result *state.Result) {
+func applyUpdateCheck(boot bootstrap.Bootstrap, result *state.Result, verbose bool) {
 	modulePath := fmt.Sprintf("github.com/%s/cmd/mseg-tester", boot.SoftwareRepo)
+	if verbose {
+		log.Printf("run: checking for update: go install %s@%s", modulePath, boot.SoftwareRef)
+	}
 	up, err := selfupdate.CheckAndApply(modulePath, boot.SoftwareRef)
 	if err != nil {
 		result.Checks = append(result.Checks, state.CheckResult{

@@ -112,7 +112,13 @@ write_files:
           type: native   # arrives UNTAGGED on TRUNK_IFACE itself -- not a VLAN sub-interface
           dnsServer: "192.168.128.5"
           dnsServer6: "fd00:192:168:128::5"
-          dnsCheck: "mam-hh-gw.128.adviser.com."
+          dnsCheck:
+            local:
+              tests:
+                - "mam-hh-gw.128.adviser.com."
+            remote:
+              tests:
+                - "google.com."
           reverseCheck:
             ip: "192.168.128.1"                    # gateway, conventionally .1
             expect: "mam-hh-gw.128.adviser.com."
@@ -125,7 +131,13 @@ write_files:
           type: vlan
           dnsServer: "192.168.129.5"
           dnsServer6: "fd00:192:168:129::5"
-          dnsCheck: "mam-hh-dmz.adviser.com."
+          dnsCheck:
+            local:
+              tests:
+                - "mam-hh-dmz.adviser.com."
+            remote:
+              tests:
+                - "google.com."
           reverseCheck:
             ip: "192.168.129.1"
             expect: "mam-hh-dmz.adviser.com."
@@ -138,7 +150,14 @@ write_files:
           type: vlan
           dnsServer: "192.168.130.5"
           dnsServer6: "fd00:192:168:130::5"
-          dnsCheck: "for-130.adviser.com."
+          dnsCheck:
+            local:
+              tests:
+                - "for-130.adviser.com."
+            remote:
+              tests:
+                - "google.com."
+                - "heise.de."
           geoCheck:
             url: "https://ifconfig.co/country"
             expect: "Germany"                      # mullvad-de exit
@@ -148,7 +167,13 @@ write_files:
           type: vlan
           dnsServer: "192.168.131.5"
           dnsServer6: "fd00:192:168:131::5"
-          dnsCheck: "mullvad-us.adviser.com."
+          dnsCheck:
+            local:
+              tests:
+                - "mullvad-us.adviser.com."
+            remote:
+              tests:
+                - "google.com."
           geoCheck:
             url: "https://ifconfig.co/country"
             expect: "United States"                # mullvad-us exit

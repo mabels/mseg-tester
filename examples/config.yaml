@@ -18,6 +18,20 @@
 # doc), so these checks double as an ongoing regression check for that,
 # not just IPv4/IPv6 parity.
 #
+# dnsCheck has two independent, both-optional groups -- local and remote
+# -- each just a list of records to resolve (tests) plus an optional
+# server override:
+#   - local:  no server set -> queries BOTH dnsServer (IPv4) and
+#             dnsServer6 (IPv6, if set) for every test. Set server to
+#             query only that one address instead.
+#   - remote: no server set -> uses the system's default resolver
+#             (whatever /etc/resolv.conf points at -- normally this
+#             segment's own resolver too, via DHCP). Set server to dial
+#             a specific address instead (e.g. a public resolver).
+# Listing a real local record AND a public one (e.g. google.com) in the
+# same group's tests catches "answers its own zone but doesn't forward
+# upstream" and vice versa -- two separate, real failure modes.
+#
 # reverseCheck/reverseCheck6 are optional too -- confirm the segment's own
 # resolver also answers PTR (rDNS) queries correctly, not just forward
 # ones (a resolver's forward zone can be fine while its PTR zone is
@@ -39,7 +53,13 @@ segments:
     type: native   # this trunk's untagged/native VLAN -- arrives directly on the trunk NIC, no 802.1Q tag. At most one segment may be "native"; every other segment must be "vlan".
     dnsServer: "192.168.128.5"
     dnsServer6: "fd00:192:168:128::5"
-    dnsCheck: "mam-hh-gw.128.adviser.com."
+    dnsCheck:
+      local:
+        tests:
+          - "mam-hh-gw.128.adviser.com."
+      remote:
+        tests:
+          - "google.com."
     reverseCheck:
       ip: "192.168.128.1"                       # the segment's gateway -- conventionally .1
       expect: "mam-hh-gw.128.adviser.com."
@@ -53,7 +73,13 @@ segments:
     type: vlan     # a normal 802.1Q-tagged sub-interface. ifname: is optional -- only needed if your naming convention differs from "<trunkInterface>.<name>".
     dnsServer: "192.168.129.5"
     dnsServer6: "fd00:192:168:129::5"
-    dnsCheck: "mam-hh-dmz.adviser.com."
+    dnsCheck:
+      local:
+        tests:
+          - "mam-hh-dmz.adviser.com."
+      remote:
+        tests:
+          - "google.com."
     reverseCheck:
       ip: "192.168.129.1"
       expect: "mam-hh-dmz.adviser.com."
@@ -67,7 +93,14 @@ segments:
     type: vlan
     dnsServer: "192.168.130.5"
     dnsServer6: "fd00:192:168:130::5"
-    dnsCheck: "for-130.adviser.com."
+    dnsCheck:
+      local:
+        tests:
+          - "for-130.adviser.com."
+      remote:
+        tests:
+          - "google.com."
+          - "heise.de."           # a real German site -- some sense the VPN exit's DNS forwarding also looks regionally sane
     geoCheck:
       url: "https://ifconfig.co/country"
       expect: "Germany"        # mullvad-de exit
@@ -78,7 +111,13 @@ segments:
     type: vlan
     dnsServer: "192.168.131.5"
     dnsServer6: "fd00:192:168:131::5"
-    dnsCheck: "mullvad-us.adviser.com."
+    dnsCheck:
+      local:
+        tests:
+          - "mullvad-us.adviser.com."
+      remote:
+        tests:
+          - "google.com."
     geoCheck:
       url: "https://ifconfig.co/country"
       expect: "United States"  # mullvad-us exit
