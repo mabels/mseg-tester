@@ -17,8 +17,16 @@
 # periodic RA is unconditionally dropped -- see internal/checks' package
 # doc), so these checks double as an ongoing regression check for that,
 # not just IPv4/IPv6 parity.
+#
+# reverseCheck/reverseCheck6 are optional too -- confirm the segment's own
+# resolver also answers PTR (rDNS) queries correctly, not just forward
+# ones (a resolver's forward zone can be fine while its PTR zone is
+# stale/wrong). Only set on 128/129 below: those are the two segments
+# with a real local gateway host to reverse-resolve; 130/131 are
+# WireGuard geo-exits, a different kind of check entirely (geoCheck).
+# The domain below (adviser.com) is real and intentionally public.
 
-rebootDelay: "6m"   # wait this long after checks+update+report, before rebooting into the next segment. omit/"" for immediate.
+rebootDelay: "6m"   # only applies on updateSegment, after that segment's checks+update+report -- every other segment always reboots immediately. omit/"" for immediate everywhere.
 
 report:
   url: "http://192.168.129.88:9091/report"   # e.g. the k8s-hosted collector on the management segment
@@ -27,14 +35,26 @@ segments:
   - name: "128"
     dnsServer: "192.168.128.5"
     dnsServer6: "fd00:192:168:128::5"
-    dnsCheck: "proxmox.example."
+    dnsCheck: "mam-hh-gw.128.adviser.com."
+    reverseCheck:
+      ip: "192.168.128.1"                       # the segment's gateway -- conventionally .1
+      expect: "mam-hh-gw.128.adviser.com."
+    reverseCheck6:
+      ip: "fd00:192:168:128::1"                 # IPv6 gateway -- conventionally ::1
+      expect: "mam-hh-gw.128.adviser.com."
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 
   - name: "129"
     dnsServer: "192.168.129.5"
     dnsServer6: "fd00:192:168:129::5"
-    dnsCheck: "log-sink.example."
+    dnsCheck: "mam-hh-gw.129.adviser.com."
+    reverseCheck:
+      ip: "192.168.129.1"
+      expect: "mam-hh-gw.129.adviser.com."
+    reverseCheck6:
+      ip: "fd00:192:168:129::1"
+      expect: "mam-hh-gw.129.adviser.com."
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 

@@ -27,12 +27,14 @@ test every cycle, entirely self-contained inside the guest.
   once by cloud-init: which NIC is the trunk, which segment can reach the
   internet (`updateSegment`), where the public software repo is, and
   (optionally) where a private config repo is.
-- **`/etc/mseg-tester/config.yaml`** — the content: segment list, test
-  targets, reboot timing, where to report results. Two ways to get it
-  onto the VM, pick either:
-  - **easy (the default)**: cloud-init just writes it directly,
-    alongside `bootstrap.yaml` — no repo, no token. Changing it means
-    editing `cloud-init/user-data.yaml` and re-provisioning.
+- **`/mseg-tester/config.yaml`** — the content: segment list, test
+  targets, reboot timing, where to report results. Lives alongside
+  `active.yaml`/`*.result.yaml` rather than under `/etc`, since it's the
+  one file here that genuinely changes on its own schedule. Two ways to
+  get it onto the VM, pick either:
+  - **easy (the default)**: cloud-init just writes it directly — no
+    repo, no token. Changing it means editing `cloud-init/user-data.yaml`
+    and re-provisioning.
   - set `bootstrap.yaml`'s `configRepo` to a repo URL holding this file
     and it's fetched/refreshed at runtime instead (`internal/configsync`)
     — changing it is then a commit, not a re-provision.
@@ -55,9 +57,13 @@ test every cycle, entirely self-contained inside the guest.
    doesn't run its own DHCP client or send its own router solicitation).
 4. Resolve a configured record directly against that segment's own DNS
    server over IPv4 (`dns`), and over IPv6 too if `dnsServer6` is set
-   (`dns6`) — and, for segments expected to exit through a specific
-   region (a WireGuard tunnel), fetch a geo-IP echo URL and confirm the
-   response mentions the right country (`geo`).
+   (`dns6`) — then, if `reverseCheck`/`reverseCheck6` are set, confirm
+   that same server also answers PTR queries correctly (`reverse`,
+   `reverse6`; a resolver's forward zone can be fine while its PTR zone
+   is stale or wrong, so this is a genuinely separate failure mode) —
+   and, for segments expected to exit through a specific region (a
+   WireGuard tunnel), fetch a geo-IP echo URL and confirm the response
+   mentions the right country (`geo`).
 5. Confirm plain TCP reachability to a known external address over IPv4
    (`routing`), and over IPv6 too if `routingCheck6` is set (`routing6`)
    — proves the segment's actual egress uplink carries traffic, not just
@@ -75,7 +81,10 @@ test every cycle, entirely self-contained inside the guest.
    Every other segment skips both — there's nothing to reach the module
    proxy/GitHub or the report target through.
 8. Write netplan for the *next* segment in the cycle, advance
-   `active.yaml`, sleep `config.yaml`'s `rebootDelay` (if set), reboot.
+   `active.yaml`, and reboot — **only** on `updateSegment`, first sleep
+   `config.yaml`'s `rebootDelay` (if set); every other segment reboots
+   immediately, so the delay is paid once per full cycle, not once per
+   segment.
 
 ## Setup
 
@@ -156,17 +165,19 @@ at all.
 | `configRef` | Branch/tag/commit to fetch it at. Ignored when `configRepo` is empty |
 | `configToken` | Fine-grained GitHub PAT, read-only, scoped to only `configRepo`. Leave empty if `configRepo` is empty or public |
 | `stateDir` | Defaults to `/mseg-tester` |
-| `configLocalPath` | Where `config.yaml` lives — either written directly by cloud-init, or fetched into, depending on `configRepo`. Defaults to `/etc/mseg-tester/config.yaml` |
+| `configLocalPath` | Where `config.yaml` lives — either written directly by cloud-init, or fetched into, depending on `configRepo`. Defaults to `/mseg-tester/config.yaml` |
 
 ## `config.yaml` reference (see `examples/config.yaml`; either written directly by cloud-init or fetched from `configRepo` — same shape either way)
 
 | Field | Meaning |
 |---|---|
-| `rebootDelay` | Optional Go duration (e.g. `"6m"`) to wait before rebooting into the next segment. Omit for immediate |
+| `rebootDelay` | Optional Go duration (e.g. `"6m"`) to wait, only on `updateSegment`, before rebooting into the next segment. Every other segment always reboots immediately. Omit for immediate everywhere |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].dnsServer` / `.dnsCheck` | Resolver to query (IPv4), record expected to resolve |
 | `segments[].dnsServer6` | Optional. Same resolver's IPv6 address, e.g. `fd00:192:168:129::5` — runs the same `dnsCheck` record over IPv6 (`dns6`); omit to skip |
+| `segments[].reverseCheck` | Optional `{ip, expect}` — confirms `dnsServer` also answers a PTR query for `ip` with `expect` (`reverse`); omit to skip |
+| `segments[].reverseCheck6` | Optional `{ip, expect}` — `reverseCheck`'s IPv6 counterpart, queried against `dnsServer6` (`reverse6`); skipped if `dnsServer6` is empty even when this is set |
 | `segments[].geoCheck` | Optional `{url, expect}` — omit to skip |
 | `segments[].routingCheck` | `host:port` expected to be TCP-reachable (IPv4) |
 | `segments[].routingCheck6` | Optional. IPv6 equivalent, e.g. `[2606:4700:4700::1111]:443` (brackets required) — omit to skip `routing6` |

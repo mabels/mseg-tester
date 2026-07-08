@@ -67,7 +67,7 @@ write_files:
   # list, test targets, timing, report target) -- pick ONE:
   #
   #   1. EASY (the default below): leave configRepo empty and just fill
-  #      in the plain /etc/mseg-tester/config.yaml write_files entry
+  #      in the plain /mseg-tester/config.yaml write_files entry
   #      further down. No private repo, no token, nothing fetched at
   #      runtime -- changing it means editing this file and
   #      re-provisioning the VM, which is fine to start with.
@@ -91,16 +91,18 @@ write_files:
       configRef: "main"
       configToken: ""     # only needed if configRepo is set and private
       stateDir: "/mseg-tester"
-      configLocalPath: "/etc/mseg-tester/config.yaml"
+      configLocalPath: "/mseg-tester/config.yaml"
 
   # The plain config.yaml used when configRepo above is left empty (the
   # default/easy path) -- see examples/config.yaml for the same shape
-  # with more commentary. Fill in real dnsCheck/routingCheck/geoCheck
-  # targets per segment; these are placeholders. If you DO set
-  # configRepo, this file is still what's used until the first
-  # successful sync overwrites it -- harmless to leave in place either
-  # way.
-  - path: /etc/mseg-tester/config.yaml
+  # with more commentary. Lives alongside active.yaml/*.result.yaml
+  # (StateDir) rather than under /etc -- it's the one file here that
+  # genuinely changes on its own schedule (self-update/config-sync/report
+  # all touch state on updateSegment), not a static, rarely-changing fact
+  # like bootstrap.yaml. If you DO set configRepo, this file is still
+  # what's used until the first successful sync overwrites it -- harmless
+  # to leave in place either way.
+  - path: /mseg-tester/config.yaml
     permissions: "0644"
     content: |
       rebootDelay: "6m"
@@ -108,13 +110,25 @@ write_files:
         - name: "128"
           dnsServer: "192.168.128.5"
           dnsServer6: "fd00:192:168:128::5"
-          dnsCheck: "proxmox.example."   # replace: a real record in this segment's zone
+          dnsCheck: "mam-hh-gw.128.adviser.com."   # replace: a real record in this segment's zone
+          reverseCheck:
+            ip: "192.168.128.1"                    # gateway, conventionally .1
+            expect: "mam-hh-gw.128.adviser.com."
+          reverseCheck6:
+            ip: "fd00:192:168:128::1"               # IPv6 gateway, conventionally ::1
+            expect: "mam-hh-gw.128.adviser.com."
           routingCheck: "1.1.1.1:443"
           routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "129"
           dnsServer: "192.168.129.5"
           dnsServer6: "fd00:192:168:129::5"
-          dnsCheck: "log-sink.example." # replace
+          dnsCheck: "mam-hh-gw.129.adviser.com."   # replace
+          reverseCheck:
+            ip: "192.168.129.1"
+            expect: "mam-hh-gw.129.adviser.com."
+          reverseCheck6:
+            ip: "fd00:192:168:129::1"
+            expect: "mam-hh-gw.129.adviser.com."
           routingCheck: "1.1.1.1:443"
           routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "130"

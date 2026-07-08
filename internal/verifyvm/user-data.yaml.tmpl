@@ -106,13 +106,15 @@ write_files:
       configRef: "{{.ConfigRef}}"
       configToken: "{{.ConfigToken}}"
       stateDir: "/mseg-tester"
-      configLocalPath: "/etc/mseg-tester/config.yaml"
+      configLocalPath: "/mseg-tester/config.yaml"
 {{- if .ConfigYAML}}
 
   # Static config.yaml provided directly via -config-file -- no private
-  # repo or token needed. If configRepo above is also set, this is just
-  # the starting point until the first successful sync overwrites it.
-  - path: /etc/mseg-tester/config.yaml
+  # repo or token needed. Lives alongside active.yaml/*.result.yaml
+  # rather than under /etc -- see bootstrap.Bootstrap.ConfigLocalPath's
+  # doc comment. If configRepo above is also set, this is just the
+  # starting point until the first successful sync overwrites it.
+  - path: /mseg-tester/config.yaml
     permissions: "0644"
     content: |
 {{indent .ConfigYAML "      "}}

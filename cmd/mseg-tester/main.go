@@ -36,7 +36,7 @@
 //	/etc/mseg-tester/bootstrap.yaml -- local, rare, written once by
 //	                                   cloud-init (trunk NIC, update
 //	                                   segment, where the two repos are).
-//	/etc/mseg-tester/config.yaml    -- content, frequent, fetched from
+//	/mseg-tester/config.yaml        -- content, frequent, fetched from
 //	                                   the private repo named in
 //	                                   bootstrap.yaml (segment list, test
 //	                                   targets, timing, reporting).
@@ -188,8 +188,16 @@ func run(bootstrapPath string, noReboot bool) error {
 		return nil
 	}
 
-	if delay := cfg.RebootDelayDuration(); delay > 0 {
-		time.Sleep(delay)
+	// RebootDelay only ever applies on updateSegment -- every other
+	// segment has nothing to wait for (no self-update/config-sync/report
+	// happens there, see applyUpdateCheck above) and should cycle straight
+	// through to the next reboot as fast as possible. Pausing there too
+	// would multiply the whole cycle's wall-clock time by the segment
+	// count for no reason.
+	if active.Segment == boot.UpdateSegment {
+		if delay := cfg.RebootDelayDuration(); delay > 0 {
+			time.Sleep(delay)
+		}
 	}
 
 	// A self-update above may have just replaced this executable on

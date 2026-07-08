@@ -54,7 +54,7 @@ func TestRenderUserDataWithoutConfigYAML(t *testing.T) {
 	// configLocalPath inside bootstrap.yaml legitimately mentions this
 	// path regardless -- check specifically for a write_files entry
 	// whose *path* is config.yaml, not just any mention of the string.
-	if strings.Contains(string(out), "- path: /etc/mseg-tester/config.yaml") {
+	if strings.Contains(string(out), "- path: /mseg-tester/config.yaml") {
 		t.Errorf("expected no config.yaml write_files entry when ConfigYAML is empty, got:\n%s", out)
 	}
 	assertValidYAML(t, out)
@@ -71,7 +71,7 @@ func TestRenderUserDataWithConfigYAML(t *testing.T) {
 		t.Fatalf("RenderUserData: %v", err)
 	}
 	s := string(out)
-	if !strings.Contains(s, "path: /etc/mseg-tester/config.yaml") {
+	if !strings.Contains(s, "path: /mseg-tester/config.yaml") {
 		t.Errorf("expected a config.yaml write_files entry, got:\n%s", s)
 	}
 	if !strings.Contains(s, "      rebootDelay: \"10s\"") {

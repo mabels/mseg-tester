@@ -83,7 +83,12 @@ type Bootstrap struct {
 	// StateDir -- see internal/state. Defaults to /mseg-tester.
 	StateDir string `yaml:"stateDir"`
 	// ConfigLocalPath is where the fetched config.yaml is written --
-	// defaults to /etc/mseg-tester/config.yaml.
+	// defaults to /mseg-tester/config.yaml, alongside StateDir's
+	// active.yaml/*.result.yaml rather than under /etc -- this is the one
+	// file on the box that changes every time a segment cycles back
+	// around (self-update/config-sync/report all touch state here on
+	// UpdateSegment), so it lives with the rest of the mutable state, not
+	// with bootstrap.yaml's genuinely-static facts.
 	ConfigLocalPath string `yaml:"configLocalPath"`
 }
 
@@ -105,7 +110,7 @@ func Load(path string) (Bootstrap, error) {
 		b.StateDir = "/mseg-tester"
 	}
 	if b.ConfigLocalPath == "" {
-		b.ConfigLocalPath = "/etc/mseg-tester/config.yaml"
+		b.ConfigLocalPath = "/mseg-tester/config.yaml"
 	}
 	if b.SoftwareRef == "" {
 		b.SoftwareRef = "latest"

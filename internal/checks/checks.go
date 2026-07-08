@@ -33,9 +33,10 @@ import (
 const timeout = 8 * time.Second
 
 // Run performs every check for one segment and returns them in a fixed
-// order (dhcp, dhcp6, dns, dns6 if configured, geo if configured, routing,
-// routing6 if configured) -- fixed order so <segment>.result.yaml reads
-// the same shape every time, easier to diff across runs by hand.
+// order (dhcp, dhcp6, dns, dns6 if configured, reverse if configured,
+// reverse6 if configured, geo if configured, routing, routing6 if
+// configured) -- fixed order so <segment>.result.yaml reads the same
+// shape every time, easier to diff across runs by hand.
 //
 // nativeSegment is bootstrap.Bootstrap.NativeSegment, passed through
 // unchanged -- see netplan.IfaceName for what it means. Empty is fine:
@@ -48,6 +49,12 @@ func Run(seg config.Segment, trunkInterface, nativeSegment string) []state.Check
 	}
 	if seg.DNSServer6 != "" {
 		results = append(results, dns6Check(seg))
+	}
+	if seg.ReverseCheck != nil {
+		results = append(results, reverseCheck(seg))
+	}
+	if seg.ReverseCheck6 != nil && seg.DNSServer6 != "" {
+		results = append(results, reverse6Check(seg))
 	}
 	if seg.GeoCheck != nil {
 		results = append(results, geoCheck(seg))
@@ -166,6 +173,76 @@ func dns6Check(seg config.Segment) state.CheckResult {
 		return state.CheckResult{Name: name, Pass: false, Detail: fmt.Sprintf("resolving %s via %s: no answers", seg.DNSCheck, seg.DNSServer6)}
 	}
 	return state.CheckResult{Name: name, Pass: true, Detail: strings.Join(addrs, ",")}
+}
+
+// reverseCheck confirms ReverseCheck.IP reverse-resolves (PTR) to
+// ReverseCheck.Expect against this segment's own resolver (DNSServer,
+// same "bypass /etc/resolv.conf, ask THIS segment's server specifically"
+// reasoning as dnsCheck). A resolver can answer forward queries fine
+// while its PTR zone is stale or wrong, so this is a genuinely distinct
+// failure mode from dnsCheck, not just a formality.
+func reverseCheck(seg config.Segment) state.CheckResult {
+	name := "reverse"
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: timeout}
+			return d.DialContext(ctx, network, net.JoinHostPort(seg.DNSServer, "53"))
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	names, err := resolver.LookupAddr(ctx, seg.ReverseCheck.IP)
+	if err != nil {
+		return state.CheckResult{
+			Name: name, Pass: false,
+			Detail: fmt.Sprintf("reverse-resolving %s via %s: %v", seg.ReverseCheck.IP, seg.DNSServer, err),
+		}
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, seg.ReverseCheck.Expect) {
+			return state.CheckResult{Name: name, Pass: true, Detail: n}
+		}
+	}
+	return state.CheckResult{
+		Name: name, Pass: false,
+		Detail: fmt.Sprintf("reverse-resolving %s via %s: expected %q, got %v", seg.ReverseCheck.IP, seg.DNSServer, seg.ReverseCheck.Expect, names),
+	}
+}
+
+// reverse6Check mirrors reverseCheck but reaches this segment's resolver
+// over IPv6 (DNSServer6) -- only run when both DNSServer6 and
+// ReverseCheck6 are configured. IP itself may be either family (PTR
+// lookups work the same regardless of which transport carries the DNS
+// query), but the "typical" case is IP being that segment's own IPv6
+// gateway/host address.
+func reverse6Check(seg config.Segment) state.CheckResult {
+	name := "reverse6"
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: timeout}
+			return d.DialContext(ctx, network, net.JoinHostPort(seg.DNSServer6, "53"))
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	names, err := resolver.LookupAddr(ctx, seg.ReverseCheck6.IP)
+	if err != nil {
+		return state.CheckResult{
+			Name: name, Pass: false,
+			Detail: fmt.Sprintf("reverse-resolving %s via %s: %v", seg.ReverseCheck6.IP, seg.DNSServer6, err),
+		}
+	}
+	for _, n := range names {
+		if strings.EqualFold(n, seg.ReverseCheck6.Expect) {
+			return state.CheckResult{Name: name, Pass: true, Detail: n}
+		}
+	}
+	return state.CheckResult{
+		Name: name, Pass: false,
+		Detail: fmt.Sprintf("reverse-resolving %s via %s: expected %q, got %v", seg.ReverseCheck6.IP, seg.DNSServer6, seg.ReverseCheck6.Expect, names),
+	}
 }
 
 // geoCheck fetches GeoCheck.URL and, if Expect is set, confirms the

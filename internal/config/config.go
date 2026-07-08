@@ -31,6 +31,19 @@ type GeoCheck struct {
 	Expect string `yaml:"expect,omitempty"`
 }
 
+// ReverseCheck optionally confirms this segment's resolver also answers
+// PTR queries correctly (rDNS) -- IP is expected to reverse-resolve to
+// Expect (a FQDN; trailing dot recommended to match how
+// net.Resolver.LookupAddr returns names). This is a genuinely separate
+// failure mode from forward resolution (DNSCheck): a resolver can answer
+// forward queries fine while its PTR zone is stale, unconfigured, or
+// simply wrong, and rDNS is what a surprising number of other systems
+// (mail, some VPN/geo services, logging) quietly depend on.
+type ReverseCheck struct {
+	IP     string `yaml:"ip"`
+	Expect string `yaml:"expect"`
+}
+
 // Segment is one entry in the cycle -- everything needed to configure
 // netplan for it and to check it once it's up.
 type Segment struct {
@@ -53,6 +66,13 @@ type Segment struct {
 	// "dns6" check (the same DNSCheck record, reached over IPv6) is
 	// skipped when this is empty.
 	DNSServer6 string `yaml:"dnsServer6,omitempty"`
+	// ReverseCheck is OPTIONAL -- see ReverseCheck above. Queried against
+	// DNSServer (IPv4 transport). Nil skips the "reverse" check.
+	ReverseCheck *ReverseCheck `yaml:"reverseCheck,omitempty"`
+	// ReverseCheck6 is OPTIONAL -- ReverseCheck's IPv6 counterpart,
+	// queried against DNSServer6. Skipped (like "dns6") when DNSServer6
+	// is empty, even if this is set.
+	ReverseCheck6 *ReverseCheck `yaml:"reverseCheck6,omitempty"`
 	// GeoCheck is optional -- see GeoCheck above. Nil skips it.
 	GeoCheck *GeoCheck `yaml:"geoCheck,omitempty"`
 	// RoutingCheck is a plain external address/host expected to be
@@ -82,10 +102,14 @@ type Report struct {
 // (see package doc above) -- everything in here is safe to change on its
 // own schedule, independent of any bootstrap.yaml/VM-level fact.
 type Config struct {
-	// RebootDelay is how long to wait after a test completes (and after
-	// any self-update/config-sync/report on the update segment) before
-	// actually rebooting into the next segment -- e.g. "10s". Empty/zero
-	// means reboot immediately. A Go duration string (time.ParseDuration).
+	// RebootDelay is how long to wait, ONLY on updateSegment, after a
+	// test completes (and after that segment's self-update/config-sync/
+	// report) before actually rebooting into the next segment -- e.g.
+	// "6m". Every other segment has nothing to wait for (none of that
+	// happens there) and always reboots immediately regardless of this
+	// value, so the delay is paid once per full cycle, not once per
+	// segment. Empty/zero means updateSegment reboots immediately too. A
+	// Go duration string (time.ParseDuration).
 	RebootDelay string    `yaml:"rebootDelay,omitempty"`
 	Report      *Report   `yaml:"report,omitempty"`
 	Segments    []Segment `yaml:"segments"`
