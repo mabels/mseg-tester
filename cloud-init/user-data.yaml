@@ -21,7 +21,6 @@ hostname: mseg-tester
 package_update: true
 packages:
   - ca-certificates
-  - golang-go
 
 write_files:
   # Initial netplan: segment 129 only, same shape mseg-tester itself
@@ -154,12 +153,32 @@ write_files:
   # bootstrap.yaml's configRepo is set, gets synced by the running
   # binary itself on the first `run` -- internal/configsync, gated on
   # being on updateSegment) -- this script never needs to fetch it.
+  #
+  # The Go toolchain itself is installed HERE, from the official tarball
+  # at go.dev, not via an apt package -- golang-go's availability/name
+  # varies by Ubuntu release and archive component (confirmed missing on
+  # at least one real image), whereas go.dev's tarball URL scheme has
+  # been stable for years and needs nothing but https. /usr/local/go/bin
+  # also has to be on the mseg-tester.service unit's own PATH for later
+  # self-updates -- see internal/deploy/mseg-tester.service.
   - path: /usr/local/sbin/mseg-tester-bootstrap.sh
     permissions: "0755"
     content: |
       #!/bin/sh
       set -e
       export HOME="${HOME:-/root}"
+      export PATH="/usr/local/go/bin:$PATH"
+
+      if ! command -v go >/dev/null 2>&1; then
+        echo "mseg-tester-bootstrap: installing Go toolchain from go.dev" | systemd-cat -t mseg-tester-bootstrap
+        goarch=$(dpkg --print-architecture)
+        gover=$(curl -fsSL https://go.dev/VERSION?m=text | head -1)
+        curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/${gover}.linux-${goarch}.tar.gz"
+        rm -rf /usr/local/go
+        tar -C /usr/local -xzf /tmp/go.tar.gz
+        rm -f /tmp/go.tar.gz
+      fi
+
       bootstrap_yaml="/etc/mseg-tester/bootstrap.yaml"
       software_repo=$(sed -n 's/^softwareRepo: *"\(.*\)"/\1/p' "$bootstrap_yaml")
       software_ref=$(sed -n 's/^softwareRef: *"\(.*\)"/\1/p' "$bootstrap_yaml")
