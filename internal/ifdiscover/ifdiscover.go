@@ -128,24 +128,54 @@ func findByPCI(sysBusPCIDevices, vendor, device string) (string, error) {
 }
 
 func findFirstWireless(sysClassNet string) (string, error) {
-	names, err := listInterfaces(sysClassNet)
+	names, err := ListWireless(sysClassNet)
 	if err != nil {
 		return "", err
 	}
+	if len(names) == 0 {
+		return "", fmt.Errorf("ifdiscover: no Wi-Fi-capable interface found under %s (no \"phy80211\" symlink or \"wireless\" subdirectory on any interface)", sysClassNet)
+	}
+	return names[0], nil
+}
+
+// ListWireless returns every Wi-Fi-capable interface name under
+// sysClassNet -- same detection Find's "auto" strategy uses (a
+// "phy80211" symlink, or a "wireless" subdirectory -- either indicates a
+// radio; not every kernel/driver exposes both), excluding "lo", sorted
+// for a deterministic order across boots. An empty, non-error result
+// means "no Wi-Fi hardware present at all", a perfectly normal case most
+// callers don't need to treat specially.
+//
+// Used by cmd/mseg-tester to know which interface(s) to explicitly force
+// administratively DOWN in netplan on any segment that isn't itself
+// "wifi" (see internal/netplan.Render's disableWifiIfaces parameter) --
+// necessary because a passed-through radio's kernel network device
+// exists as soon as its driver binds, independent of whether netplan
+// ever declares or associates it, which otherwise leaves it idle-but-
+// present rather than genuinely off (confirmed live: this broke
+// internal/ifaces.Find's interface-counting heuristic once passthrough
+// Wi-Fi actually started working -- see that package's doc comment).
+func ListWireless(sysClassNet string) ([]string, error) {
+	names, err := listInterfaces(sysClassNet)
+	if err != nil {
+		return nil, err
+	}
 	sort.Strings(names)
+	var out []string
 	for _, name := range names {
 		if name == "lo" {
 			continue
 		}
 		dir := filepath.Join(sysClassNet, name)
 		if _, err := os.Lstat(filepath.Join(dir, "phy80211")); err == nil {
-			return name, nil
+			out = append(out, name)
+			continue
 		}
 		if fi, err := os.Stat(filepath.Join(dir, "wireless")); err == nil && fi.IsDir() {
-			return name, nil
+			out = append(out, name)
 		}
 	}
-	return "", fmt.Errorf("ifdiscover: no Wi-Fi-capable interface found under %s (no \"phy80211\" symlink or \"wireless\" subdirectory on any interface)", sysClassNet)
+	return out, nil
 }
 
 func listInterfaces(sysClassNet string) ([]string, error) {

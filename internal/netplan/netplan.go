@@ -5,8 +5,17 @@
 // (or, here, on the next boot), whatever's NOT declared in the merged
 // config across all netplan files simply isn't (re)created. Writing a
 // fresh file naming only the one target segment's VLAN is what "disable
-// the others" actually means in practice -- there's nothing else to
-// explicitly tear down.
+// the others" actually means in practice for a VLAN sub-interface --
+// there's genuinely nothing else to tear down, since it doesn't exist
+// until netplan creates it.
+//
+// A PCI-passthrough Wi-Fi radio is a different story: its kernel network
+// device exists as soon as its driver binds, entirely independent of
+// netplan, so merely not mentioning it in a given segment's file doesn't
+// actually leave it "off" -- confirmed live, and why Render/Write take a
+// disableWifiIfaces parameter that explicitly forces every OTHER
+// Wi-Fi-capable interface (and, on a "wifi" segment, the trunk NIC too)
+// down via "activation-mode: off" rather than relying on omission alone.
 //
 // Most segments ride as an 802.1Q-tagged VLAN sub-interface on top of the
 // trunk NIC (Proxmox hands this VM one NIC, trunked with every segment's
@@ -61,12 +70,63 @@ func yamlDoubleQuote(s string) string {
 	return strings.TrimRight(string(b), "\n")
 }
 
+// offDeviceEntries renders one device entry per name, each forced
+// administratively off ("activation-mode: off") -- the shared body used
+// under both an "ethernets:" and a "wifis:" stanza (the schema for both
+// is otherwise the same set of keys). See disableWifiIfaces' doc comment
+// on Render for why this is needed at all, rather than just omitting the
+// device.
+func offDeviceEntries(names []string) string {
+	var b strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&b, "    %s:\n      dhcp4: false\n      dhcp6: false\n      activation-mode: off\n", name)
+	}
+	return b.String()
+}
+
+// offEthernetsStanza renders a complete "ethernets:" stanza forcing name
+// off -- used by the "wifi" branch to force the trunk NIC off, since
+// leaving it merely undeclared isn't enough once anything else on the
+// box (not just Wi-Fi -- see disableWifiIfaces' doc comment on Render
+// for the general problem) could otherwise leave it lingering.
+func offEthernetsStanza(name string) string {
+	return "  ethernets:\n" + offDeviceEntries([]string{name})
+}
+
+// offWifisStanza renders a complete "wifis:" stanza forcing every named
+// interface off, or "" if names is empty -- see disableWifiIfaces' doc
+// comment on Render.
+func offWifisStanza(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return "  wifis:\n" + offDeviceEntries(names)
+}
+
 // Render builds the netplan YAML content Write would install for seg,
 // without touching disk -- split out so it can be inspected offline (see
 // cmd/mseg-tester's "render-netplan" subcommand), e.g. when a VM is stuck
 // at boot and there's no shell to read /etc/netplan/90-mseg-tester.yaml
 // from directly.
-func Render(trunkInterface string, seg config.Segment) string {
+//
+// disableWifiIfaces names every Wi-Fi-capable interface that ISN'T this
+// segment's own (see cmd/mseg-tester's caller, which derives it via
+// internal/ifdiscover.ListWireless) -- each gets an explicit
+// "activation-mode: off" entry, forcing it administratively down, rather
+// than simply being left out of this file the way earlier versions of
+// this package worked. That distinction matters: a PCI-passthrough Wi-Fi
+// radio's kernel network device exists (and is visible to
+// internal/ifaces.Find, which counts it) as soon as its driver binds --
+// entirely independent of whether netplan ever mentions it -- so merely
+// omitting it doesn't actually keep it "off" the way the same omission
+// does for e.g. a tagged VLAN sub-interface that genuinely doesn't exist
+// until netplan creates it. Confirmed live: switching between a "wifi"
+// segment and a wired one left the previously-active radio still
+// present (if not necessarily still associated) until this was added.
+// Empty/nil is fine -- most boxes have at most one radio, so this is
+// usually empty on a "wifi" segment's own render and a 1-element slice
+// otherwise.
+func Render(trunkInterface string, seg config.Segment, disableWifiIfaces []string) string {
 	var content string
 	switch seg.Type {
 	case "native":
@@ -95,7 +155,7 @@ network:
       dhcp6: false
       accept-ra: true
       link-local: [ipv4, ipv6]
-`, seg.Name, trunkInterface, trunkInterface, trunkInterface)
+%s`, seg.Name, trunkInterface, trunkInterface, trunkInterface, offWifisStanza(disableWifiIfaces))
 
 	case "wifi":
 		// The active segment is a dedicated Wi-Fi radio (config.Segment.Type
@@ -103,11 +163,12 @@ network:
 		// own PCI/USB device, not riding the trunk NIC's VLANs at all.
 		// seg.IfName is REQUIRED for this type (enforced by config.Load):
 		// unlike "vlan" there's no trunk-derived default name for a
-		// standalone radio. The trunk interface itself is left out of this
-		// file entirely here, the same way the "native" branch above
-		// leaves the Wi-Fi radio out -- whichever segment ISN'T active has
-		// no stanza at all, and just stays unconfigured/idle until its own
-		// turn in the cycle.
+		// standalone radio. The trunk interface is explicitly forced off
+		// below (activation-mode: off) rather than simply left out of
+		// this file, same rationale as disableWifiIfaces' doc comment on
+		// Render -- it exists as a kernel device (net0/virtio) whether or
+		// not netplan mentions it, so "not mentioned" alone doesn't mean
+		// "off".
 		//
 		// dhcp6/accept-ra/link-local: same SLAAC rationale as every other
 		// branch here. SSID/password go through yamlDoubleQuote rather
@@ -120,8 +181,9 @@ network:
 # wholesale every time the active segment changes. See internal/netplan.
 #
 # Segment %s is a dedicated Wi-Fi radio (config.Segment.Type "wifi") --
-# %s associates directly to an access point; there is no vlans/ethernets
-# stanza for the trunk interface in this file at all.
+# %s associates directly to an access point. The trunk NIC (%s) is
+# explicitly forced off below -- see Render's disableWifiIfaces doc
+# comment for why that's not just belt-and-suspenders.
 #
 # dhcp6 stays false -- this network uses SLAAC (router advertisements),
 # not DHCPv6. accept-ra/link-local are set explicitly for the same reason
@@ -137,7 +199,8 @@ network:
       access-points:
         %s:
           password: %s
-`, seg.Name, seg.IfName, seg.IfName, yamlDoubleQuote(seg.SSID), yamlDoubleQuote(seg.PSK))
+%s%s`, seg.Name, seg.IfName, trunkInterface, seg.IfName, yamlDoubleQuote(seg.SSID), yamlDoubleQuote(seg.PSK),
+			offDeviceEntries(disableWifiIfaces), offEthernetsStanza(trunkInterface))
 
 	default: // "vlan"
 		ifaceName := IfaceName(trunkInterface, seg)
@@ -176,7 +239,7 @@ network:
       dhcp6: false
       accept-ra: true
       link-local: [ipv4, ipv6]
-`, trunkInterface, ifaceName, vlanID, trunkInterface)
+%s`, trunkInterface, ifaceName, vlanID, trunkInterface, offWifisStanza(disableWifiIfaces))
 	}
 	return content
 }
@@ -185,9 +248,10 @@ network:
 // segment. Does NOT call `netplan apply` -- this tool's whole model is
 // "write config, then reboot" (see cmd/mseg-tester's run loop), so a live
 // apply here would just be redundant work before the reboot throws it
-// away and re-derives the same state from disk anyway.
-func Write(trunkInterface string, seg config.Segment) error {
-	content := Render(trunkInterface, seg)
+// away and re-derives the same state from disk anyway. disableWifiIfaces
+// is passed straight through to Render -- see its doc comment.
+func Write(trunkInterface string, seg config.Segment, disableWifiIfaces []string) error {
+	content := Render(trunkInterface, seg, disableWifiIfaces)
 
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {

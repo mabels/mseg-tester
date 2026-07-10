@@ -8,14 +8,19 @@
 // as e.g. "ens18.129@ens18", not a bare string -- this package reads that
 // directly rather than assuming it.
 //
-// mseg-tester's own netplan.Write only ever brings up at most three
+// mseg-tester's own netplan.Write only ever brings UP at most three
 // interfaces on this box at any one time: "lo", the trunk NIC itself, and
 // -- only when the active segment is a tagged VLAN, not the trunk's
 // native/untagged one -- exactly one "<trunk>.<segment>@<trunk>" VLAN
 // sub-interface. That small, fixed universe is what Find below relies on:
-// "whichever non-loopback interface is actually the right one" can be
-// determined without matching any name at all, in either topology --
-// see Find's doc comment.
+// "whichever non-loopback, UP interface is actually the right one" can be
+// determined without matching any name at all, in either topology -- see
+// Find's doc comment. "UP" matters, not just "non-loopback": a
+// passed-through Wi-Fi radio's kernel network device can exist on a
+// non-"wifi" segment's boot too (its driver binds independent of
+// netplan), so Find deliberately ignores anything not UP -- see Find's
+// doc comment and internal/netplan.Render's "activation-mode: off"
+// stanzas, which are what keeps it that way.
 package ifaces
 
 import (
@@ -116,13 +121,27 @@ func Parse(output string) ([]Iface, error) {
 //
 // Otherwise it's discovered from the fixed "lo, trunk, at most one VLAN
 // sub-interface" universe described in the package doc, with no name
-// assumed or compared against config at all: exactly one non-loopback
-// interface means seg is the trunk's native/untagged VLAN (its traffic
-// rides the trunk NIC directly); exactly two means seg is a tagged VLAN
-// (the bare trunk NIC, address-less and marked "optional" by
+// assumed or compared against config at all: exactly one non-loopback,
+// UP interface means seg is the trunk's native/untagged VLAN (its
+// traffic rides the trunk NIC directly); exactly two means seg is a
+// tagged VLAN (the bare trunk NIC, address-less and marked "optional" by
 // internal/netplan.Write, plus the "name@parent" VLAN sub-interface
 // that's actually carrying seg's traffic -- identified by having a
 // Parent at all, not by matching any particular name).
+//
+// Only UP interfaces count toward that fixed universe -- deliberately,
+// not an oversight: a PCI-passthrough Wi-Fi radio's kernel network
+// device exists (and shows up in `ip a`/List) as soon as its driver
+// binds, entirely independent of whether netplan/wpa_supplicant ever
+// associates it. internal/netplan.Render now explicitly forces that
+// radio administratively DOWN ("activation-mode: off") on every segment
+// that isn't itself a "wifi" segment, specifically so it's excluded
+// here rather than silently inflating this count -- confirmed live as a
+// real breakage once passthrough Wi-Fi actually started working for the
+// first time: a native segment saw 2 non-loopback interfaces instead of
+// 1 (trunk + idle radio) and a tagged VLAN segment saw 3 instead of 2,
+// both hitting this function's error paths below even though the
+// segment's own traffic was working fine.
 func Find(list []Iface, seg config.Segment) (Iface, error) {
 	if seg.IfName != "" {
 		for _, f := range list {
@@ -135,9 +154,10 @@ func Find(list []Iface, seg config.Segment) (Iface, error) {
 
 	var nonLo []Iface
 	for _, f := range list {
-		if f.Name != "lo" {
-			nonLo = append(nonLo, f)
+		if f.Name == "lo" || !f.Up {
+			continue
 		}
+		nonLo = append(nonLo, f)
 	}
 
 	switch len(nonLo) {

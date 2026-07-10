@@ -173,6 +173,51 @@ func TestFindAutoRecognizesLegacyWirelessDir(t *testing.T) {
 	}
 }
 
+func TestListWirelessFindsOnlyWirelessInterfaces(t *testing.T) {
+	sysClassNet, _ := fixture(t)
+	got, err := ListWireless(sysClassNet)
+	if err != nil {
+		t.Fatalf("ListWireless: %v", err)
+	}
+	if len(got) != 1 || got[0] != "wlan0" {
+		t.Errorf("ListWireless = %v, want [\"wlan0\"] (lo and eth0 have no wireless markers)", got)
+	}
+}
+
+func TestListWirelessEmptyWhenNoRadioPresent(t *testing.T) {
+	root := t.TempDir()
+	sysClassNet := filepath.Join(root, "class", "net")
+	writeFile(t, filepath.Join(sysClassNet, "lo", "address"), "00:00:00:00:00:00\n")
+	writeFile(t, filepath.Join(sysClassNet, "eth0", "address"), "aa:bb:cc:dd:ee:ff\n")
+	got, err := ListWireless(sysClassNet)
+	if err != nil {
+		t.Fatalf("ListWireless: %v (no matching hardware should not be an error)", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListWireless = %v, want empty", got)
+	}
+}
+
+func TestListWirelessSortedAcrossMultipleRadios(t *testing.T) {
+	root := t.TempDir()
+	sysClassNet := filepath.Join(root, "class", "net")
+	writeFile(t, filepath.Join(sysClassNet, "lo", "address"), "00:00:00:00:00:00\n")
+	if err := os.MkdirAll(filepath.Join(sysClassNet, "wlan1", "wireless"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sysClassNet, "wlan0", "wireless"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ListWireless(sysClassNet)
+	if err != nil {
+		t.Fatalf("ListWireless: %v", err)
+	}
+	want := []string{"wlan0", "wlan1"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("ListWireless = %v, want %v (sorted)", got, want)
+	}
+}
+
 func TestResolveIfNamePrefersLiteralOverride(t *testing.T) {
 	// Must not touch the real filesystem at all when ifname is already
 	// set -- this is the one ResolveIfName case safe to run without a

@@ -49,7 +49,7 @@ func TestIfaceName(t *testing.T) {
 
 func TestRenderNativeSegment(t *testing.T) {
 	seg := config.Segment{Name: "128", Type: "native"}
-	out := Render("ens18", seg)
+	out := Render("ens18", seg, nil)
 
 	if !strings.Contains(out, "    ens18:") {
 		t.Errorf("expected the trunk interface configured directly, got:\n%s", out)
@@ -71,7 +71,7 @@ func TestRenderNativeSegment(t *testing.T) {
 
 func TestRenderVLANSegment(t *testing.T) {
 	seg := config.Segment{Name: "129", Type: "vlan"}
-	out := Render("ens18", seg)
+	out := Render("ens18", seg, nil)
 
 	if !strings.Contains(out, "ens18.129:") {
 		t.Errorf("expected a tagged VLAN sub-interface, got:\n%s", out)
@@ -87,7 +87,7 @@ func TestRenderVLANSegment(t *testing.T) {
 
 func TestRenderIfNameOverride(t *testing.T) {
 	seg := config.Segment{Name: "130", Type: "vlan", IfName: "customvlan0"}
-	out := Render("ens18", seg)
+	out := Render("ens18", seg, nil)
 	if !strings.Contains(out, "customvlan0:") {
 		t.Errorf("expected the IfName override to be used as the VLAN sub-interface name, got:\n%s", out)
 	}
@@ -101,7 +101,7 @@ func TestRenderWifiSegment(t *testing.T) {
 		SSID:   "MAM-HH",
 		PSK:    "von Winsen nach Hamburg",
 	}
-	out := Render("ens18", seg)
+	out := Render("ens18", seg, nil)
 
 	if !strings.Contains(out, "wifis:") {
 		t.Errorf("expected a wifis: stanza, got:\n%s", out)
@@ -115,13 +115,75 @@ func TestRenderWifiSegment(t *testing.T) {
 	if !strings.Contains(out, `password: "von Winsen nach Hamburg"`) {
 		t.Errorf("expected the PSK as a quoted password, got:\n%s", out)
 	}
-	if strings.Contains(out, "ethernets:") || strings.Contains(out, "vlans:") {
-		t.Errorf("wifi segment shouldn't touch the trunk NIC at all -- no ethernets:/vlans: stanza expected, got:\n%s", out)
+	if strings.Contains(out, "vlans:") {
+		t.Errorf("wifi segment doesn't ride a VLAN -- no vlans: stanza expected, got:\n%s", out)
 	}
-	if strings.Contains(out, "ens18") {
-		t.Errorf("wifi segment's netplan shouldn't mention the trunk interface at all, got:\n%s", out)
+	// The trunk NIC (net0/virtio) exists as a kernel device whether or
+	// not netplan mentions it -- so a wifi segment's netplan MUST
+	// explicitly force it off (activation-mode: off), not simply omit
+	// it, or internal/ifaces.Find's interface-counting heuristic (and
+	// potentially the trunk itself) can end up in an unexpected state.
+	// See Render's disableWifiIfaces doc comment.
+	if !strings.Contains(out, "ethernets:") {
+		t.Errorf("expected an ethernets: stanza explicitly forcing the trunk NIC off, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ens18:") {
+		t.Errorf("expected the trunk interface (ens18) named in that ethernets: stanza, got:\n%s", out)
+	}
+	if !strings.Contains(out, "activation-mode: off") {
+		t.Errorf("expected the trunk NIC forced off via activation-mode: off, got:\n%s", out)
 	}
 	assertValidNetplanYAML(t, out)
+}
+
+func TestRenderWifiSegmentDisablesOtherWifiIfaces(t *testing.T) {
+	seg := config.Segment{
+		Name: "wifi-128", Type: "wifi", IfName: "wlan0",
+		SSID: "MAM-HH", PSK: "secret",
+	}
+	out := Render("ens18", seg, []string{"wlan1"})
+
+	if !strings.Contains(out, "wlan1:") {
+		t.Errorf("expected the other radio (wlan1) named for explicit shutdown, got:\n%s", out)
+	}
+	// Both wlan0 (active) and wlan1 (forced off) must be under the SAME
+	// "wifis:" key -- a second top-level "wifis:" key would silently
+	// clobber the first in YAML.
+	if strings.Count(out, "wifis:") != 1 {
+		t.Errorf("expected exactly one \"wifis:\" key, got %d, out:\n%s", strings.Count(out, "wifis:"), out)
+	}
+	assertValidNetplanYAML(t, out)
+}
+
+func TestRenderVLANSegmentDisablesWifiIface(t *testing.T) {
+	seg := config.Segment{Name: "129", Type: "vlan"}
+	out := Render("ens18", seg, []string{"wlan0"})
+
+	if !strings.Contains(out, "wifis:") {
+		t.Errorf("expected a wifis: stanza forcing wlan0 off, got:\n%s", out)
+	}
+	if !strings.Contains(out, "wlan0:") || !strings.Contains(out, "activation-mode: off") {
+		t.Errorf("expected wlan0 explicitly forced off, got:\n%s", out)
+	}
+	assertValidNetplanYAML(t, out)
+}
+
+func TestRenderNativeSegmentDisablesWifiIface(t *testing.T) {
+	seg := config.Segment{Name: "128", Type: "native"}
+	out := Render("ens18", seg, []string{"wlan0"})
+
+	if !strings.Contains(out, "wifis:") || !strings.Contains(out, "wlan0:") || !strings.Contains(out, "activation-mode: off") {
+		t.Errorf("expected wlan0 explicitly forced off, got:\n%s", out)
+	}
+	assertValidNetplanYAML(t, out)
+}
+
+func TestRenderNoDisableListMeansNoExtraStanza(t *testing.T) {
+	seg := config.Segment{Name: "128", Type: "native"}
+	out := Render("ens18", seg, nil)
+	if strings.Contains(out, "wifis:") {
+		t.Errorf("expected no wifis: stanza at all when disableWifiIfaces is empty, got:\n%s", out)
+	}
 }
 
 func TestRenderWifiEscapesSSIDAndPSK(t *testing.T) {
@@ -139,7 +201,7 @@ func TestRenderWifiEscapesSSIDAndPSK(t *testing.T) {
 		SSID:   "MAM-HH-US",
 		PSK:    `weird"pass: word\here`,
 	}
-	out := Render("ens18", seg)
+	out := Render("ens18", seg, nil)
 	assertValidNetplanYAML(t, out)
 
 	var parsed struct {

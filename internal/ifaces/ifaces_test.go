@@ -149,6 +149,48 @@ func TestFindIfNameOverride(t *testing.T) {
 	}
 }
 
+func TestFindIgnoresDownWifiRadioOnNativeSegment(t *testing.T) {
+	// Regression: a PCI-passthrough Wi-Fi radio's kernel network device
+	// exists (and shows up in `ip a`) as soon as its driver binds,
+	// regardless of whether netplan ever declares/associates it -- this
+	// used to inflate the non-loopback count and break Find even though
+	// the radio was never actually carrying traffic. internal/netplan.Render
+	// now explicitly forces it DOWN ("activation-mode: off") on every
+	// non-"wifi" segment specifically so it looks like this: present,
+	// but not UP.
+	transcript := nativeSegmentTranscript + `4: wlan0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    link/ether 90:7a:be:dc:34:a9 brd ff:ff:ff:ff:ff:ff
+`
+	list, err := Parse(transcript)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	iface, err := Find(list, config.Segment{Name: "128", Type: "native"})
+	if err != nil {
+		t.Fatalf("Find: %v (an idle, DOWN wifi radio should be ignored, not counted as a second non-loopback interface)", err)
+	}
+	if iface.Name != "ens18" {
+		t.Errorf("Find() = %q, want \"ens18\"", iface.Name)
+	}
+}
+
+func TestFindIgnoresDownWifiRadioOnVLANSegment(t *testing.T) {
+	transcript := vlanSegmentTranscript + `4: wlan0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN group default qlen 1000
+    link/ether 90:7a:be:dc:34:a9 brd ff:ff:ff:ff:ff:ff
+`
+	list, err := Parse(transcript)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	iface, err := Find(list, config.Segment{Name: "129", Type: "vlan"})
+	if err != nil {
+		t.Fatalf("Find: %v (an idle, DOWN wifi radio should be ignored, not counted as a third non-loopback interface)", err)
+	}
+	if iface.Name != "ens18.129" {
+		t.Errorf("Find() = %q, want \"ens18.129\"", iface.Name)
+	}
+}
+
 func TestFindAmbiguousTopology(t *testing.T) {
 	// Three non-loopback interfaces shouldn't happen in practice (netplan.Write
 	// never brings up more than trunk + one VLAN sub-interface), but Find should

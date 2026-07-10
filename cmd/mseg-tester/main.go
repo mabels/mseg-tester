@@ -142,7 +142,13 @@ func renderNetplanCmd(args []string) {
 	if !ok {
 		log.Fatalf("mseg-tester: segment %q not declared in %s", *segmentName, *configFile)
 	}
-	fmt.Print(netplan.Render(*trunkIface, seg))
+	// disableWifiIfaces is deliberately nil here, not derived from this
+	// machine's real hardware (internal/ifdiscover.ListWireless) -- this
+	// subcommand's whole point is a pure, deterministic preview from just
+	// a local config.yaml, runnable on any machine, not just the VM
+	// itself (see the doc comment above). The actual `run` subcommand
+	// (wifiIfacesToDisable) is what queries real hardware.
+	fmt.Print(netplan.Render(*trunkIface, seg, nil))
 }
 
 // findIfaceCmd resolves -mac/-pci-vendor+-pci-device (or, with none of
@@ -342,10 +348,11 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	if err != nil {
 		return fmt.Errorf("resolving interface for next segment %s: %w", next, err)
 	}
+	disableWifiIfaces := wifiIfacesToDisable(nextSeg)
 	if verbose {
-		log.Printf("run: writing netplan for next segment %s", next)
+		log.Printf("run: writing netplan for next segment %s (disabling wifi interfaces: %v)", next, disableWifiIfaces)
 	}
-	if err := netplan.Write(boot.TrunkInterface, nextSeg); err != nil {
+	if err := netplan.Write(boot.TrunkInterface, nextSeg, disableWifiIfaces); err != nil {
 		return fmt.Errorf("writing netplan for next segment %s: %w", next, err)
 	}
 	// StopOn must carry forward unchanged here -- it's set once (hand-
@@ -408,6 +415,36 @@ func resolveIfName(seg config.Segment) (config.Segment, error) {
 	}
 	seg.IfName = resolved
 	return seg, nil
+}
+
+// wifiIfacesToDisable returns every Wi-Fi-capable interface on this
+// machine EXCEPT seg's own (seg.IfName, expected already resolved via
+// resolveIfName if seg itself is "wifi") -- passed straight to
+// netplan.Render/Write's disableWifiIfaces parameter, so every OTHER
+// radio gets an explicit "activation-mode: off" rather than merely being
+// left out of the file. See that parameter's doc comment for why: a
+// passed-through radio's kernel network device exists as soon as its
+// driver binds, independent of netplan, which otherwise breaks
+// internal/ifaces.Find's interface-counting heuristic once a segment
+// other than that radio's own becomes active (confirmed live).
+//
+// Best-effort: hardware detection failing (or finding no Wi-Fi hardware
+// at all, the common case on a box with none) isn't fatal to writing
+// netplan for a segment that doesn't depend on it -- nil is returned
+// instead of an error either way.
+func wifiIfacesToDisable(seg config.Segment) []string {
+	all, err := ifdiscover.ListWireless("/sys/class/net")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, name := range all {
+		if seg.Type == "wifi" && name == seg.IfName {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // applyTimezone runs `timedatectl set-timezone tz` if tz is set -- a
