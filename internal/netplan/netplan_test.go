@@ -136,6 +136,9 @@ func TestRenderWifiSegment(t *testing.T) {
 	if !strings.Contains(out, "link-local: []") {
 		t.Errorf("expected the trunk NIC's link-local address assignment also disabled, got:\n%s", out)
 	}
+	if !strings.Contains(out, "accept-ra: false") {
+		t.Errorf("expected the trunk NIC's accept-ra also disabled, got:\n%s", out)
+	}
 	assertValidNetplanYAML(t, out)
 }
 
@@ -171,6 +174,9 @@ func TestRenderVLANSegmentDisablesWifiIface(t *testing.T) {
 	if !strings.Contains(out, "link-local: []") {
 		t.Errorf("expected wlan0's link-local address assignment also disabled, got:\n%s", out)
 	}
+	if !strings.Contains(out, "accept-ra: false") {
+		t.Errorf("expected wlan0's accept-ra also disabled, got:\n%s", out)
+	}
 	assertValidNetplanYAML(t, out)
 }
 
@@ -183,6 +189,9 @@ func TestRenderNativeSegmentDisablesWifiIface(t *testing.T) {
 	}
 	if !strings.Contains(out, "link-local: []") {
 		t.Errorf("expected wlan0's link-local address assignment also disabled, got:\n%s", out)
+	}
+	if !strings.Contains(out, "accept-ra: false") {
+		t.Errorf("expected wlan0's accept-ra also disabled, got:\n%s", out)
 	}
 	assertValidNetplanYAML(t, out)
 }
