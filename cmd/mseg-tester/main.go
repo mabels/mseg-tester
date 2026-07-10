@@ -20,20 +20,23 @@
 //	                             one with a route anywhere outside the
 //	                             segment under test), refreshes config.yaml
 //	                             from the private repo (internal/configsync),
-//	                          3. checks the active segment (DHCP address
+//	                          3. applies config.Timezone via `timedatectl
+//	                             set-timezone` if set (see applyTimezone)
+//	                             -- best-effort, never fatal,
+//	                          4. checks the active segment (DHCP address
 //	                             present, DNS answers, optionally a geo
 //	                             check, plain routing reachability -- see
 //	                             internal/checks), retrying the WHOLE batch
 //	                             up to config.CheckAttempts times if any
 //	                             single check in it failed,
-//	                          4. records the result,
-//	                          5. on the update segment: rebuilds itself via
+//	                          5. records the result,
+//	                          6. on the update segment: rebuilds itself via
 //	                             `go install` straight from source and
 //	                             replaces its own executable if the result
 //	                             differs (internal/selfupdate), then POSTs
 //	                             every accumulated result to
 //	                             config.Report.URL if set (internal/report),
-//	                          6. unless active.yaml's StopOn equals the
+//	                          7. unless active.yaml's StopOn equals the
 //	                             segment just tested (see
 //	                             state.Active.StopOn): writes netplan for
 //	                             the NEXT segment in the cycle, waits
@@ -67,6 +70,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/mabels/mseg-tester/internal/bootstrap"
@@ -198,6 +202,8 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		return err
 	}
 
+	applyTimezone(cfg.Timezone, verbose)
+
 	if firstBoot {
 		names := cfg.CycleNames()
 		active = state.Active{Segment: names[0], Cycle: names}
@@ -285,7 +291,12 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	if err := netplan.Write(boot.TrunkInterface, nextSeg); err != nil {
 		return fmt.Errorf("writing netplan for next segment %s: %w", next, err)
 	}
-	if err := state.SaveActive(boot.StateDir, state.Active{Segment: next, Cycle: active.Cycle}); err != nil {
+	// StopOn must carry forward unchanged here -- it's set once (hand-
+	// edited) to name a FUTURE segment to eventually park on, not
+	// something this write should ever clear. Dropping it here would
+	// silently wipe it out on the very next cycle step, before the
+	// cycle ever reaches the segment it was meant to stop on.
+	if err := state.SaveActive(boot.StateDir, state.Active{Segment: next, Cycle: active.Cycle, StopOn: active.StopOn}); err != nil {
 		return fmt.Errorf("advancing active state to %s: %w", next, err)
 	}
 
@@ -321,6 +332,28 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	// from a genuinely cold boot, which is this whole tool's point.
 	// Always reboot, updated or not.
 	return exec.Command("systemctl", "reboot").Run()
+}
+
+// applyTimezone runs `timedatectl set-timezone tz` if tz is set -- a
+// no-op (empty tz) leaves the system's current timezone untouched
+// entirely. Idempotent (timedatectl itself no-ops if already set to
+// tz), so safe to call unconditionally on every run rather than only
+// once at first boot -- config.Config.Timezone can change at runtime
+// (configsync) the same as any other config.yaml value, with no VM
+// re-provisioning needed to pick it up. Best-effort: an invalid zone
+// name or any other failure is logged, never fatal -- a wrong/missing
+// timezone shouldn't block the actual network checks this tool exists
+// to run.
+func applyTimezone(tz string, verbose bool) {
+	if tz == "" {
+		return
+	}
+	if verbose {
+		log.Printf("run: setting timezone to %s", tz)
+	}
+	if out, err := exec.Command("timedatectl", "set-timezone", tz).CombinedOutput(); err != nil {
+		log.Printf("mseg-tester: setting timezone to %q: %v: %s", tz, err, strings.TrimSpace(string(out)))
+	}
 }
 
 // applyUpdateCheck is only ever called when the active segment IS

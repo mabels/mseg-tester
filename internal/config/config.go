@@ -219,9 +219,22 @@ type Config struct {
 	// if empty. A Go duration string. Has nothing to do with RebootDelay
 	// (that's once per segment, before rebooting into the next one; this
 	// is per checks batch, before even recording a result).
-	CheckRetryDelay string    `yaml:"checkRetryDelay,omitempty"`
-	Report          *Report   `yaml:"report,omitempty"`
-	Segments        []Segment `yaml:"segments"`
+	CheckRetryDelay string `yaml:"checkRetryDelay,omitempty"`
+	// Timezone is OPTIONAL -- an IANA zone name (e.g. "Europe/Berlin",
+	// "America/New_York") applied via `timedatectl set-timezone` at the
+	// start of every run (see cmd/mseg-tester's applyTimezone) --
+	// idempotent, so a no-op once already set. Lives here rather than in
+	// bootstrap.yaml/cloud-init deliberately: it's content, not a
+	// VM-level fact, so it can be changed the same way as any other
+	// config.yaml value (edit and re-provision on the easy path, or a
+	// commit to configRepo on the synced path) without recreating the
+	// VM. Empty (the default) leaves whatever timezone the base Ubuntu
+	// Server image already has (normally UTC) untouched. Applying this
+	// is best-effort: an invalid zone name is logged, not fatal --
+	// wrong/missing timezone shouldn't block the actual network checks.
+	Timezone string    `yaml:"timezone,omitempty"`
+	Report   *Report   `yaml:"report,omitempty"`
+	Segments []Segment `yaml:"segments"`
 }
 
 // RebootDelayDuration parses RebootDelay, defaulting to 0 (immediate) for

@@ -58,7 +58,9 @@ happens, not just the final summary.
    (best-effort — a failed fetch just leaves the last successfully-synced,
    or cloud-init-provisioned, `config.yaml` in place). Skipped entirely
    when `configRepo` is empty.
-3. Discover which real interface is carrying this segment's traffic by
+3. Apply `config.yaml`'s `timezone` if set (`timedatectl set-timezone`) —
+   idempotent and best-effort, never fatal.
+4. Discover which real interface is carrying this segment's traffic by
    running `ip a` and parsing its output (`internal/ifaces`) — not by
    assuming a name from config: mseg-tester's own netplan never brings up
    more than "lo", the trunk NIC, and (only for a tagged VLAN segment)
@@ -75,7 +77,7 @@ happens, not just the final summary.
    SLAAC-assigned global IPv6 address seen (not just the first) — all
    appended to the check's `Detail`, purely informational, never fails
    the check on their own.
-4. Run every test in `dnsCheck.tests`, whichever are set — a single flat
+5. Run every test in `dnsCheck.tests`, whichever are set — a single flat
    list, each test naming a `type` and running once per server in that
    test's own `servers` (or `dnsCheck.servers` if the test doesn't
    override it):
@@ -113,14 +115,14 @@ happens, not just the final summary.
    For segments expected to exit through a specific region (a WireGuard
    tunnel), `geoCheck` fetches a geo-IP echo URL and confirms the
    response mentions the right country (`geo`).
-5. Confirm plain TCP reachability to a known external address over IPv4
+6. Confirm plain TCP reachability to a known external address over IPv4
    (`routing`), and over IPv6 too if `routingCheck6` is set (`routing6`)
    — proves the segment's actual egress uplink carries traffic, not just
    that DNS resolved.
-6. Write the result to `/mseg-tester/<segment>.result.yaml` (overwritten
+7. Write the result to `/mseg-tester/<segment>.result.yaml` (overwritten
    each time this segment comes back around — the cycle itself is the
    time dimension, this file is always "most recent pass").
-7. **Only if** the segment just tested is `updateSegment`:
+8. **Only if** the segment just tested is `updateSegment`:
    - rebuild itself via `go install` straight from `softwareRepo`'s
      source and replace itself if the result differs (`internal/selfupdate`
      — no GitHub release, no build pipeline, no asset to keep in sync);
@@ -132,7 +134,7 @@ happens, not just the final summary.
 
    Every other segment skips all of this — there's nothing to reach the
    module proxy/GitHub or the report target(s) through.
-8. **Unless `active.yaml`'s `stopOn` equals the segment just tested**:
+9. **Unless `active.yaml`'s `stopOn` equals the segment just tested**:
    write netplan for the *next* segment in the cycle, advance
    `active.yaml`, sleep `config.yaml`'s `rebootDelay` (if set), and
    reboot — on **every** segment, not just `updateSegment`, so there's
@@ -249,6 +251,7 @@ handy since `config.yaml` may be fetched from a shared or even public
 | `rebootDelay` | Optional Go duration (e.g. `"2m"`) to wait, on EVERY segment, before rebooting into the next one — gives a window to log in and inspect the box (e.g. a slow/hung boot) before it cycles away. Paid once per segment, so a full cycle's wall-clock time grows by roughly (segment count × `rebootDelay`). Omit for immediate everywhere |
 | `checkAttempts` | Optional. How many times to run the WHOLE batch of checks before giving up — if ANY check fails, the whole batch (not just that check) is re-run. Stops as soon as one full attempt passes every check. Defaults to `3` if omitted |
 | `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait before re-running the whole batch after a failure. Defaults to `"10s"` if omitted |
+| `timezone` | Optional IANA zone name (e.g. `"Europe/Berlin"`), applied via `timedatectl set-timezone` at the start of every run — idempotent, best-effort (an invalid zone is logged, never fatal). Lives in `config.yaml` rather than `bootstrap.yaml` since it's content that can change without re-provisioning the VM. Omit to leave the base image's timezone (normally UTC) untouched |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket`, typically written as `"${INFLUX_TOKEN}"` (see the `"${VAR}"` expansion note above) rather than a literal value — see `internal/report.PushInflux` and `examples/config.yaml` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |

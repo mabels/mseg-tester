@@ -69,6 +69,8 @@ rebootDelay: "2m"   # applies on EVERY segment, before rebooting into the next o
 checkAttempts: 3       # how many times to try EACH check before giving up on it. stops as soon as one attempt passes. defaults to 3 if omitted.
 checkRetryDelay: "10s" # wait between attempts of the SAME check. defaults to "10s" if omitted.
 
+timezone: "Europe/Berlin" # optional IANA zone name, applied via `timedatectl set-timezone` at the start of every run -- idempotent, so safe on every boot. Omit to leave the base image's timezone (normally UTC) alone. Lives here, not in bootstrap.yaml, since it's content that can change without re-provisioning the VM -- see internal/config.Config.Timezone.
+
 report:
   # Writes straight into an existing InfluxDB v2 instance -- see
   # internal/report.PushInflux. "url" is InfluxDB's own base URL, not a
