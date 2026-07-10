@@ -201,14 +201,21 @@ func TestNet0(t *testing.T) {
 			want: "virtio,bridge=vmbr0,trunks=128;129;130",
 		},
 		{
-			name: "native segment plus other tagged segments",
+			// No "tag="/"trunks=" at all when NativeSegment is set --
+			// TrunkVLANs is ignored in this branch. See net0's doc
+			// comment: on an OVS bridge, Proxmox's "tag=" for a
+			// genuinely-untagged VLAN goes through OVS's native-untagged
+			// VLAN-database handling instead of leaving it alone, which
+			// broke delivery for that segment in practice (confirmed
+			// live against gw-to-earth-ng's OVN/OVS setup).
+			name: "native segment plus other tagged segments -- no vlan params at all",
 			p:    Params{Bridge: "vmbr1", TrunkVLANs: []string{"128", "129", "130", "131"}, NativeSegment: "128"},
-			want: "virtio,bridge=vmbr1,tag=128,trunks=129;130;131",
+			want: "virtio,bridge=vmbr1",
 		},
 		{
-			name: "native segment only, nothing else tagged",
+			name: "native segment only, nothing else tagged -- still no vlan params",
 			p:    Params{Bridge: "vmbr1", TrunkVLANs: []string{"128"}, NativeSegment: "128"},
-			want: "virtio,bridge=vmbr1,tag=128",
+			want: "virtio,bridge=vmbr1",
 		},
 	}
 	for _, c := range cases {

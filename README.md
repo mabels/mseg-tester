@@ -255,7 +255,7 @@ handy since `config.yaml` may be fetched from a shared or even public
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket`, typically written as `"${INFLUX_TOKEN}"` (see the `"${VAR}"` expansion note above) rather than a literal value — see `internal/report.PushInflux` and `examples/config.yaml` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
-| `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether the segment becomes Proxmox `net0`'s `tag=` or `trunks=` — the single source of truth for "which segment is native" |
+| `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether `net0` gets `trunks=` at all — the single source of truth for "which segment is native". If any segment is `"native"`, `net0` is created with **no** `tag=`/`trunks=` whatsoever (see `internal/verifyvm.Params.net0`'s doc comment: on an OVS bridge, Proxmox's `tag=` for a genuinely-untagged VLAN misroutes it — confirmed live) — every VLAN reaches the guest untouched and `internal/netplan.Write` does the demuxing on the guest side |
 | `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |
 | `segments[].dnsCheck.servers` | List of servers every test in `tests` runs against by default (a test's own `servers` overrides this for just that test). Each entry is either `system` (the OS's default resolver) or a literal IP address, v4 or v6 (e.g. `192.168.130.5`, `fd00:192:168:130::5`, or a public resolver like `1.1.1.1`), dialed directly on port 53. At least one of `dnsCheck.servers` or every test's own `servers` is required |
 | `segments[].dnsCheck.tests[].type` | `A` / `AAAA` — `host` resolves as that record, passes on any answer, no round trip. `A-PTR` / `AAAA-PTR` — `host` forward-resolves (A/AAAA), reverse-resolves the first answer, and expects the PTR name to equal `host` — a full FCrDNS round trip against a fixed name (e.g. a segment's gateway); replaces the old `reverseCheck`/`reverseCheck6`. `Hostname4` / `Hostname6` — `domain` (no `host`): the same FCrDNS round trip, but against THIS VM's own dynamically-registered name (`os.Hostname()` + `domain`) instead of a fixed one, proving dynamic DNS registration works for this roaming host; replaces the old `selfDnsDomain`. Only `Hostname4` is used anywhere yet — this network has no IPv6 DHCP to drive dynamic AAAA/PTR6 registration, so `Hostname6` would just spuriously fail. The address family tested (`A`/`AAAA` vs `A-PTR`/`AAAA-PTR` vs `Hostname4`/`Hostname6`) is always fixed by `type`, never by which server answers it |
@@ -346,6 +346,15 @@ Notes:
   (config.yaml fetched at runtime, not given as a local file), the trunk
   is left fully untagged (every VLAN passes) since there's no local
   segment list to derive from at create-time.
+- If any segment is `type: native`, `net0` is generated with **no**
+  `tag=`/`trunks=` at all, not `tag=<native>,trunks=<rest>` — on an OVS
+  bridge, giving the untagged segment an explicit `tag=` routes it
+  through OVS's native-untagged VLAN handling instead of leaving it
+  alone, which silently breaks delivery for that one segment (confirmed
+  live; see `internal/verifyvm.Params.net0`'s doc comment for the full
+  story). A plain, no-VLAN-params NIC passes every VLAN through
+  untouched, matching how the physical uplink port itself is normally
+  configured on that bridge.
 - `config.yaml` needs to come from either `-config-file` (a plain local
   file — no repo or token needed, the easy path shown above) or
   `-config-repo` (fetched/refreshed at runtime instead;

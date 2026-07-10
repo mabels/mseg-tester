@@ -60,7 +60,10 @@ type Params struct {
 	// -config-file's segments (config.Config.CycleNames), NOT a direct CLI
 	// flag: config.yaml is now the one place a segment list is declared.
 	// Empty (no -config-file, config-repo-only) means "untagged trunk,
-	// every VLAN passes" -- see net0.
+	// every VLAN passes" -- see net0. Only used when NativeSegment is
+	// empty -- see net0's doc comment for why a NativeSegment changes
+	// this entirely (Proxmox's "trunks=" restriction is skipped, not
+	// narrowed, once there's a genuinely-untagged segment involved).
 	TrunkVLANs      []string
 	Cores           int
 	MemoryMB        int
@@ -79,9 +82,9 @@ type Params struct {
 	// (config.Config.NativeSegmentName), NOT a direct CLI flag: config.yaml's
 	// per-segment Type is now the one source of truth for which segment (if
 	// any) is the trunk's native/untagged VLAN -- see internal/config and
-	// internal/netplan.IfaceName. When set, the Proxmox NIC is configured
-	// with that VLAN as net0's "tag=" (untagged/native) rather than lumped
-	// into "trunks=" with the other, genuinely tagged segments -- see net0.
+	// internal/netplan.IfaceName. When set, net0 emits NO "tag="/"trunks="
+	// at all -- see net0's doc comment for why (Proxmox's "tag=" mishandles
+	// a genuinely-untagged VLAN on an OVS bridge).
 	NativeSegment    string
 	UpdateSegment    string
 	SoftwareRepo     string
@@ -198,34 +201,42 @@ func (p Params) RenderUserData() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// net0 builds the `qm` NIC argument. With no NativeSegment, this is
-// either a fully-untagged trunk (no TrunkVLANs given -- every VLAN
-// passes) or restricted to TrunkVLANs. With NativeSegment set, that one
-// VLAN is instead Proxmox's "tag=" (delivered untagged/native), and only
-// the OTHER, genuinely-tagged segments go into "trunks=" -- matching
-// config.Segment.Type/internal/netplan.IfaceName's split on the guest
-// side. Both fields are derived together, from the same -config-file, by
-// cmd/verify-mseg-tester (see TrunkVLANs/NativeSegment above), so the
-// ValidateCreate invariant below (NativeSegment, if set, is also in
-// TrunkVLANs) should always hold in practice -- it's kept as a defensive
-// check, not a user-facing flag-combination rule anymore.
+// net0 builds the `qm` NIC argument.
+//
+// With no NativeSegment, every segment is genuinely 802.1Q-tagged on the
+// wire, so Proxmox's "trunks=" is the right tool: empty TrunkVLANs means
+// "no restriction, every VLAN passes"; otherwise only the listed VLANs
+// are allowed through, still tagged.
+//
+// With NativeSegment set, that one segment arrives GENUINELY UNTAGGED on
+// the physical wire (config.Segment.Type "native" -- see internal/config
+// and internal/netplan.IfaceName). net0 deliberately does NOT express
+// that as Proxmox's "tag=" (which on a Linux VLAN-aware bridge would be
+// fine, but on an OVS bridge -- e.g. bridge=vmbr1 here -- puts that VLAN
+// through OVS's native-untagged VLAN-database handling instead of
+// leaving it alone). That's the exact failure mode this project's own
+// OVN build already hit and documented (see gw-to-earth-ng/deployments
+// /ovn/segment-128.md: "OVS NORMAL switching only works correctly when
+// each bridge carries exactly one VLAN... or no VLAN tagging at all...
+// mixing VLANs on one bridge with explicit tags caused [replies] to
+// flood to the wrong ports"). Confirmed live: a VM created with
+// tag=<native>,trunks=<rest> never got working traffic on the native
+// segment, while the physical uplink port on that same bridge -- no
+// tag, no trunks, a fully transparent pass-through -- works correctly.
+// So when NativeSegment is set, net0 mirrors that working pattern:
+// NEITHER "tag=" NOR "trunks=" at all, regardless of TrunkVLANs -- every
+// VLAN (including the untagged native one) reaches the guest completely
+// untouched, and the guest's own netplan (internal/netplan.Write) does
+// the demuxing, exactly this tool's existing native-trunk-interface vs.
+// tagged-sub-interface split.
 func (p Params) net0() string {
-	if p.NativeSegment == "" {
-		if len(p.TrunkVLANs) == 0 {
-			return fmt.Sprintf("virtio,bridge=%s", p.Bridge)
-		}
-		return fmt.Sprintf("virtio,bridge=%s,trunks=%s", p.Bridge, strings.Join(p.TrunkVLANs, ";"))
+	if p.NativeSegment != "" {
+		return fmt.Sprintf("virtio,bridge=%s", p.Bridge)
 	}
-	var tagged []string
-	for _, v := range p.TrunkVLANs {
-		if v != p.NativeSegment {
-			tagged = append(tagged, v)
-		}
+	if len(p.TrunkVLANs) == 0 {
+		return fmt.Sprintf("virtio,bridge=%s", p.Bridge)
 	}
-	if len(tagged) == 0 {
-		return fmt.Sprintf("virtio,bridge=%s,tag=%s", p.Bridge, p.NativeSegment)
-	}
-	return fmt.Sprintf("virtio,bridge=%s,tag=%s,trunks=%s", p.Bridge, p.NativeSegment, strings.Join(tagged, ";"))
+	return fmt.Sprintf("virtio,bridge=%s,trunks=%s", p.Bridge, strings.Join(p.TrunkVLANs, ";"))
 }
 
 // ValidateCommon checks the flags every subcommand needs.
