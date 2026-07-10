@@ -416,8 +416,21 @@ func (p Params) BuildCreatePlan() ([]Step, error) {
 		"--cicustom", shQuote(fmt.Sprintf("user=%s:snippets/%s,network=%s:snippets/%s",
 			p.SnippetsStorage, p.userDataSnippet(), p.SnippetsStorage, p.networkSnippet())),
 	}
+	// q35 is required whenever a PCIe device will be passed through --
+	// Proxmox's own PCI.pm refuses hostpciN's "pcie=1" flag otherwise
+	// ("q35 machine model is not enabled"), confirmed live: `qm start`
+	// failed with exactly that error on a VM created without it. BIOS
+	// "ovmf" already implies q35 (UEFI requires it); BIOS "seabios" (the
+	// default) needs it added here explicitly, but ONLY when
+	// HostPCIDevices will actually add a pcie=1 device -- seabios+i440fx
+	// (no --machine at all) is left alone for every other VM, since q35
+	// isn't otherwise necessary and changes some default device models.
+	needsQ35 := p.BIOS == "ovmf" || len(p.HostPCIDevices) > 0
+	if needsQ35 {
+		createArgs = append(createArgs, "--machine", "q35")
+	}
 	if p.BIOS == "ovmf" {
-		createArgs = append(createArgs, "--bios", "ovmf", "--machine", "q35",
+		createArgs = append(createArgs, "--bios", "ovmf",
 			"--efidisk0", fmt.Sprintf("%s:0,efitype=4m,pre-enrolled-keys=0", p.Storage))
 	}
 	steps = append(steps, Step{

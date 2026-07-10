@@ -405,7 +405,14 @@ Notes:
   segments identified by `ifname`/`mac`/auto-discovery instead contribute
   nothing here (there's no PCI ID to look an address up for) — passthrough
   for those still has to be set up by hand, same as the manual-VM path in
-  Setup above.
+  Setup above. Whenever `-config-file` has at least one such device,
+  `create` also adds `--machine q35` to the VM itself (in addition to
+  `-bios ovmf`'s own unconditional q35) — Proxmox refuses hostpciN's
+  `pcie=1` on the default i440fx machine type ("q35 machine model is not
+  enabled"), confirmed live the hard way (`qm start` failing after an
+  otherwise-successful `create`). `-bios seabios` (the default) plus q35
+  is a normal combination and needs no `--efidisk0`; only `-bios ovmf`
+  adds that.
 - If any segment is `type: native`, `net0` is generated with **no**
   `tag=`/`trunks=` at all, not `tag=<native>,trunks=<rest>` — on an OVS
   bridge, giving the untagged segment an explicit `tag=` routes it

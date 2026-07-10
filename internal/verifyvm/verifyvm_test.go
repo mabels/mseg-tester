@@ -8,6 +8,31 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestRenderUserDataInstallsWifiAndFirmwarePackages(t *testing.T) {
+	// Regression: this template used to be missing wpasupplicant/
+	// linux-firmware/package_upgrade entirely (only cloud-init/user-data.yaml,
+	// the OTHER "production" template, had them) -- confirmed live on a
+	// verify-mseg-tester-created VM: mt7921e's firmware load failed
+	// ("hardware init failed") and mseg-tester's own service never even
+	// got a chance to deploy. Both templates must stay in parity.
+	p := Params{Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129", SoftwareRepo: "mabels/mseg-tester"}
+	out, err := p.RenderUserData()
+	if err != nil {
+		t.Fatalf("RenderUserData: %v", err)
+	}
+	s := string(out)
+	if !strings.Contains(s, "package_upgrade: true") {
+		t.Errorf("expected package_upgrade: true, got:\n%s", s)
+	}
+	if !strings.Contains(s, "- wpasupplicant") {
+		t.Errorf("expected wpasupplicant in packages, got:\n%s", s)
+	}
+	if !strings.Contains(s, "- linux-firmware") {
+		t.Errorf("expected linux-firmware in packages, got:\n%s", s)
+	}
+	assertValidYAML(t, out)
+}
+
 func TestRenderUserDataNoConsolePasswordLocksAccount(t *testing.T) {
 	p := Params{Name: "verify-mseg-tester", TrunkIface: "ens18", UpdateSegment: "129", SoftwareRepo: "mabels/mseg-tester"}
 	out, err := p.RenderUserData()
@@ -310,6 +335,86 @@ func TestBuildCreatePlanOneStepPerHostPCIDevice(t *testing.T) {
 		if s.Action == nil {
 			t.Errorf("expected a hostpci step to be an Action (needs a live lookup), not a fixed Command, got %+v", s)
 		}
+	}
+}
+
+// createStepCommand returns the Command of the "qm create ..." step, or
+// fails the test if it can't be found.
+func createStepCommand(t *testing.T, steps []Step) string {
+	t.Helper()
+	for _, s := range steps {
+		if strings.HasPrefix(s.Command, "qm create ") {
+			return s.Command
+		}
+	}
+	t.Fatalf("no \"qm create\" step found among %d steps", len(steps))
+	return ""
+}
+
+func TestBuildCreatePlanAddsQ35WhenHostPCIDevicesSet(t *testing.T) {
+	// Regression: `qm start` failed live with "q35 machine model is not
+	// enabled" -- hostpciN's "pcie=1" flag (see attachHostPCI) requires
+	// it, and BIOS "seabios" (this project's default) otherwise leaves
+	// the VM on i440fx.
+	p := minimalCreateParams()
+	p.HostPCIDevices = []string{"14c3:0616"}
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	cmd := createStepCommand(t, steps)
+	if !strings.Contains(cmd, "--machine q35") {
+		t.Errorf("expected --machine q35 in the create command when HostPCIDevices is set, got: %s", cmd)
+	}
+	if strings.Contains(cmd, "--bios ovmf") || strings.Contains(cmd, "--efidisk0") {
+		t.Errorf("expected seabios (no --bios/--efidisk0 override) when BIOS wasn't explicitly \"ovmf\", got: %s", cmd)
+	}
+}
+
+func TestBuildCreatePlanNoQ35WithoutHostPCIDevicesOrOVMF(t *testing.T) {
+	p := minimalCreateParams() // BIOS: "seabios", no HostPCIDevices
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	cmd := createStepCommand(t, steps)
+	if strings.Contains(cmd, "--machine") {
+		t.Errorf("expected no --machine override for a plain seabios VM with no passthrough, got: %s", cmd)
+	}
+}
+
+func TestBuildCreatePlanOVMFStillGetsQ35AndEfidisk(t *testing.T) {
+	p := minimalCreateParams()
+	p.BIOS = "ovmf"
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	cmd := createStepCommand(t, steps)
+	if !strings.Contains(cmd, "--machine q35") {
+		t.Errorf("expected --machine q35 for BIOS ovmf, got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "--bios ovmf") || !strings.Contains(cmd, "--efidisk0") {
+		t.Errorf("expected --bios ovmf and --efidisk0 preserved, got: %s", cmd)
+	}
+	// Make sure --machine wasn't duplicated (both the HostPCIDevices and
+	// the ovmf branch used to independently want to add it).
+	if strings.Count(cmd, "--machine") != 1 {
+		t.Errorf("expected exactly one --machine flag, got: %s", cmd)
+	}
+}
+
+func TestBuildCreatePlanOVMFWithHostPCINoDuplicateMachineFlag(t *testing.T) {
+	p := minimalCreateParams()
+	p.BIOS = "ovmf"
+	p.HostPCIDevices = []string{"14c3:0616"}
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	cmd := createStepCommand(t, steps)
+	if strings.Count(cmd, "--machine") != 1 {
+		t.Errorf("expected exactly one --machine flag even with both ovmf and hostpci devices set, got: %s", cmd)
 	}
 }
 

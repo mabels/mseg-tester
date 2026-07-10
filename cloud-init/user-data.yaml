@@ -23,6 +23,9 @@ package_upgrade: true    # dist-upgrade everything already installed on first bo
 packages:
   - ca-certificates
   - wpasupplicant         # required for netplan's wifis: stanza -- see the segment "wifi-*" entries in config.yaml below
+  - linux-firmware        # the mt7921e driver (MediaTek MT7922) needs firmware blobs not always current on the base
+                          # cloud image -- confirmed live: "Direct firmware load for mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin
+                          # failed with error -2 (ENOENT)" / "hardware init failed" until this is upgraded/(re)installed
 
 write_files:
   # Initial netplan: segment 129 only, same shape mseg-tester itself
