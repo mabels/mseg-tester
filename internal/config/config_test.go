@@ -10,7 +10,6 @@ const minimalYAML = `
 segments:
   - name: "128"
     type: native
-    dnsServer: "192.168.128.5"
     routingCheck: "1.1.1.1:443"
 `
 

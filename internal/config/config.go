@@ -20,6 +20,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"time"
 
@@ -39,47 +40,69 @@ type GeoCheck struct {
 	Expect string `yaml:"expect,omitempty"`
 }
 
-// ReverseCheck optionally confirms this segment's resolver also answers
-// PTR queries correctly (rDNS) -- IP is expected to reverse-resolve to
-// Expect (a FQDN; trailing dot recommended to match how
-// net.Resolver.LookupAddr returns names). This is a genuinely separate
-// failure mode from forward resolution (DNSCheck): a resolver can answer
-// forward queries fine while its PTR zone is stale, unconfigured, or
-// simply wrong, and rDNS is what a surprising number of other systems
-// (mail, some VPN/geo services, logging) quietly depend on.
-type ReverseCheck struct {
-	IP     string `yaml:"ip"`
-	Expect string `yaml:"expect"`
+// DNSTest is one DNS check to run -- see DNSCheck.Tests. Type selects
+// which kind of test this is, which address family it forces (regardless
+// of which server in Servers/DNSCheck.Servers ends up answering it), and
+// which of Host/Domain apply:
+//
+//   - "A" / "AAAA": Host is forward-resolved (A or AAAA respectively) and
+//     the check passes as soon as at least one answer comes back -- no
+//     round trip, no expected value, just "does this name resolve".
+//   - "A-PTR" / "AAAA-PTR": Host is forward-resolved (A for "A-PTR", AAAA
+//     for "AAAA-PTR"), the first answer is reverse-resolved (PTR), and
+//     the PTR name is expected to match Host -- a full forward-confirmed
+//     reverse DNS (FCrDNS) round trip against a fixed, known name (e.g. a
+//     segment's own gateway). Replaces what used to be
+//     Segment.ReverseCheck/ReverseCheck6.
+//   - "Hostname4" / "Hostname6": Domain (no Host) -- the exact same
+//     FCrDNS round trip as "A-PTR"/"AAAA-PTR" (forcing A or AAAA
+//     respectively), except against THIS running VM's own dynamically-
+//     registered name (os.Hostname(), whatever DHCP told the resolver to
+//     register) under Domain, instead of a fixed name -- proving dynamic
+//     DNS registration (both directions) actually works for this
+//     specific roaming host. Replaces what used to be a separate
+//     Segment.SelfDNSDomain field. "Hostname6" exists for symmetry but
+//     isn't used anywhere yet -- this network has no IPv6 DHCP, so
+//     there's no dynamic AAAA/PTR6 registration to round-trip yet.
+//
+// Every test runs once per server named in Servers (falling back to
+// DNSCheck.Servers if Servers is empty here) -- see DNSCheck's doc
+// comment for what "system"/"ipv4"/"ipv6" each mean. Servers only ever
+// picks WHICH RESOLVER answers; the address family tested is always
+// fixed by Type, so e.g. an "A-PTR" test still forces an IPv4 round trip
+// even when run against the "ipv6" server.
+type DNSTest struct {
+	Type string `yaml:"type"`
+	// Host is required for "A", "AAAA", "A-PTR", and "AAAA-PTR" -- the
+	// name to test/round-trip.
+	Host string `yaml:"host,omitempty"`
+	// Domain is required for "Hostname4"/"Hostname6" -- just the domain
+	// (e.g. "mam-hh-dmz.adviser.com."), no hostname; os.Hostname()
+	// supplies that part at check time.
+	Domain string `yaml:"domain,omitempty"`
+	// Servers OPTIONALLY overrides DNSCheck.Servers for just this one
+	// test. Nil/empty means "use DNSCheck.Servers".
+	Servers []string `yaml:"servers,omitempty"`
 }
 
-// DNSCheckGroup is one named group of forward-DNS lookups to run
-// together -- see DNSCheck and internal/checks.
-type DNSCheckGroup struct {
-	// Server is OPTIONAL and means something different in each group:
-	//   - Local group: leave empty to query BOTH of this segment's own
-	//     resolver addresses (Segment.DNSServer over IPv4, and
-	//     Segment.DNSServer6 over IPv6 too if that's set) -- every test
-	//     below is then run against each family in turn. Set Server to
-	//     query only that one specific address instead.
-	//   - Remote group: leave empty to use the SYSTEM's default resolver
-	//     (whatever /etc/resolv.conf points at -- normally this segment's
-	//     own resolver too, via DHCP) -- proving plain, unconfigured
-	//     resolution works. Set Server to dial a specific address instead
-	//     (e.g. a public resolver like "1.1.1.1").
-	Server string `yaml:"server,omitempty"`
-	// Tests is every FQDN to resolve in this group, e.g. a segment's own
-	// record alongside a public internet one, to prove the resolver also
-	// forwards upstream and not just answers its own local zone.
-	Tests []string `yaml:"tests"`
-}
-
-// DNSCheck is a segment's forward-DNS test configuration -- Local and
-// Remote are each optional (nil skips that group entirely), so a segment
-// can run either, both, or neither. See DNSCheckGroup for what "local"
-// and "remote" mean for Server's default.
+// DNSCheck is a segment's DNS test configuration: every test in Tests
+// runs once per entry named in Servers (or that test's own Servers
+// override) -- each entry is either:
+//
+//   - "system": the OS's default resolver (whatever /etc/resolv.conf
+//     points at -- normally this segment's own resolver too, via DHCP),
+//     proving plain unconfigured resolution works.
+//   - a literal IP address (v4 or v6, e.g. "192.168.130.5",
+//     "fd00:192:168:130::5", or a public resolver like "1.1.1.1"),
+//     dialed directly on port 53 (bypassing /etc/resolv.conf) -- proves
+//     THIS specific server answers, regardless of what the OS ended up
+//     with via DHCP. Any address reachable from this segment works, not
+//     just its own local resolver -- list as many as you want checked.
+//
+// At least one of Servers required (or every test must set its own).
 type DNSCheck struct {
-	Local  *DNSCheckGroup `yaml:"local,omitempty"`
-	Remote *DNSCheckGroup `yaml:"remote,omitempty"`
+	Servers []string  `yaml:"servers,omitempty"`
+	Tests   []DNSTest `yaml:"tests"`
 }
 
 // Segment is one entry in the cycle -- everything needed to configure
@@ -106,29 +129,12 @@ type Segment struct {
 	// "<trunkInterface>" for the native segment, "<trunkInterface>.<Name>"
 	// for a tagged one). Only needed if your naming convention differs.
 	IfName string `yaml:"ifname,omitempty"`
-	// DNSServer is the segment-local resolver to query directly (its
-	// own Technitium instance, typically <subnet>.5) -- also DNSCheck's
-	// Local group's default server over IPv4 when that group doesn't
-	// override Server itself.
-	DNSServer string `yaml:"dnsServer"`
-	// DNSServer6 is OPTIONAL -- the same resolver's IPv6 address (e.g.
-	// "fd00:192:168:129::5", the convention this project's other
-	// cloud-init files already use for their own IPv6 nameserver entries
-	// -- plain address, no brackets, same style as DNSServer). Also
-	// DNSCheck's Local group's default server over IPv6 -- skipped
-	// (like ReverseCheck6) when this is empty.
-	DNSServer6 string `yaml:"dnsServer6,omitempty"`
-	// DNSCheck configures this segment's forward-DNS tests -- see
-	// DNSCheck/DNSCheckGroup above and internal/checks. Optional: nil
-	// runs no forward-DNS checks at all for this segment.
+	// DNSCheck configures every DNS test for this segment -- forward
+	// lookups, gateway PTR round trips, and this VM's own dynamic-DNS
+	// round trip are all just different DNSTest.Type values in one flat
+	// list now (see DNSCheck/DNSTest above and internal/checks). Optional:
+	// nil runs no DNS checks at all for this segment.
 	DNSCheck *DNSCheck `yaml:"dnsCheck,omitempty"`
-	// ReverseCheck is OPTIONAL -- see ReverseCheck above. Queried against
-	// DNSServer (IPv4 transport). Nil skips the "reverse" check.
-	ReverseCheck *ReverseCheck `yaml:"reverseCheck,omitempty"`
-	// ReverseCheck6 is OPTIONAL -- ReverseCheck's IPv6 counterpart,
-	// queried against DNSServer6. Skipped when DNSServer6 is empty, even
-	// if this is set.
-	ReverseCheck6 *ReverseCheck `yaml:"reverseCheck6,omitempty"`
 	// GeoCheck is optional -- see GeoCheck above. Nil skips it.
 	GeoCheck *GeoCheck `yaml:"geoCheck,omitempty"`
 	// RoutingCheck is a plain external address/host expected to be
@@ -184,13 +190,18 @@ type Report struct {
 // (see package doc above) -- everything in here is safe to change on its
 // own schedule, independent of any bootstrap.yaml/VM-level fact.
 type Config struct {
-	// RebootDelay is how long to wait, ONLY on updateSegment, after a
-	// test completes (and after that segment's self-update/config-sync/
-	// report) before actually rebooting into the next segment -- e.g.
-	// "6m". Every other segment has nothing to wait for (none of that
-	// happens there) and always reboots immediately regardless of this
-	// value, so the delay is paid once per full cycle, not once per
-	// segment. Empty/zero means updateSegment reboots immediately too. A
+	// RebootDelay is how long to wait, on EVERY segment, after a test
+	// completes (and, on updateSegment only, after that segment's
+	// self-update/config-sync/report) before actually rebooting into the
+	// next segment -- e.g. "2m". Deliberately applies everywhere (not
+	// just updateSegment, as originally designed) so there's a real
+	// window to SSH/console into the box and inspect it before it cycles
+	// away, on whatever segment turns out to need debugging -- a slow or
+	// hung boot isn't necessarily on updateSegment. The cost: this is now
+	// paid once PER SEGMENT, not once per full cycle -- a full cycle's
+	// wall-clock time grows by roughly (segment count x RebootDelay), so
+	// pick a value that's fine to pay that many times, not just once.
+	// Empty/zero means immediate reboot everywhere (the old default). A
 	// Go duration string (time.ParseDuration).
 	RebootDelay string `yaml:"rebootDelay,omitempty"`
 	// CheckAttempts is how many times to run the WHOLE batch of checks
@@ -206,8 +217,8 @@ type Config struct {
 	// CheckRetryDelay is how long to wait before re-running the whole
 	// batch of checks after any one of them failed -- defaults to "10s"
 	// if empty. A Go duration string. Has nothing to do with RebootDelay
-	// (that's once per cycle, on updateSegment only; this is per checks
-	// batch, on every segment).
+	// (that's once per segment, before rebooting into the next one; this
+	// is per checks batch, before even recording a result).
 	CheckRetryDelay string    `yaml:"checkRetryDelay,omitempty"`
 	Report          *Report   `yaml:"report,omitempty"`
 	Segments        []Segment `yaml:"segments"`
@@ -301,11 +312,62 @@ func Load(path string, envVars map[string]string) (Config, error) {
 		default:
 			return c, fmt.Errorf("config: %s: segment %q has invalid type %q (must be \"native\" or \"vlan\")", path, s.Name, s.Type)
 		}
+		if err := validateDNSCheck(path, s.Name, s.DNSCheck); err != nil {
+			return c, err
+		}
 	}
 	if natives > 1 {
 		return c, fmt.Errorf("config: %s: %d segments declared type \"native\" -- a trunk has at most one native/untagged VLAN", path, natives)
 	}
 	return c, nil
+}
+
+// validServerEntry reports whether entry is a valid DNSCheck.Servers (or
+// DNSTest.Servers) entry -- either the literal "system", or a syntactically
+// valid IP address (v4 or v6) to dial directly.
+func validServerEntry(entry string) bool {
+	if entry == "system" {
+		return true
+	}
+	return net.ParseIP(entry) != nil
+}
+
+// validateDNSCheck fails fast on a malformed DNSCheck -- an invalid
+// server entry or DNSTest.Type, or a test missing the field its Type
+// requires -- rather than letting it surface later as a confusing
+// runtime check failure that looks like a network problem.
+func validateDNSCheck(path, segName string, dc *DNSCheck) error {
+	if dc == nil {
+		return nil
+	}
+	for _, entry := range dc.Servers {
+		if !validServerEntry(entry) {
+			return fmt.Errorf("config: %s: segment %q: dnsCheck.servers: invalid entry %q (must be \"system\" or a literal IP address)", path, segName, entry)
+		}
+	}
+	for _, t := range dc.Tests {
+		for _, entry := range t.Servers {
+			if !validServerEntry(entry) {
+				return fmt.Errorf("config: %s: segment %q: dnsCheck test %q: invalid server %q (must be \"system\" or a literal IP address)", path, segName, t.Type, entry)
+			}
+		}
+		if len(t.Servers) == 0 && len(dc.Servers) == 0 {
+			return fmt.Errorf("config: %s: segment %q: dnsCheck test %q: no servers -- set dnsCheck.servers or this test's own servers", path, segName, t.Type)
+		}
+		switch t.Type {
+		case "A", "AAAA", "A-PTR", "AAAA-PTR":
+			if t.Host == "" {
+				return fmt.Errorf("config: %s: segment %q: dnsCheck test type %q requires host", path, segName, t.Type)
+			}
+		case "Hostname4", "Hostname6":
+			if t.Domain == "" {
+				return fmt.Errorf("config: %s: segment %q: dnsCheck test type %q requires domain", path, segName, t.Type)
+			}
+		default:
+			return fmt.Errorf("config: %s: segment %q: dnsCheck test has invalid type %q (must be \"A\", \"AAAA\", \"A-PTR\", \"AAAA-PTR\", \"Hostname4\", or \"Hostname6\")", path, segName, t.Type)
+		}
+	}
+	return nil
 }
 
 // NativeSegmentName returns the one segment whose Type is "native", or

@@ -90,18 +90,25 @@ type Params struct {
 	ConfigRef        string
 	ConfigToken      string
 	SSHAuthorizedKey string
-	// ConfigYAML is the raw content of a plain config.yaml to write
-	// directly at deploy time -- the "make it easy first" path with no
-	// private repo or token at all. At least one of ConfigRepo or
-	// ConfigYAML must be set; both may be, in which case ConfigYAML is
-	// just the starting point until the first sync from ConfigRepo
-	// overwrites it.
+	// ConfigYAML is the content of a plain config.yaml to write directly
+	// at deploy time -- the "make it easy first" path with no private
+	// repo or token at all. At least one of ConfigRepo or ConfigYAML must
+	// be set; both may be, in which case ConfigYAML is just the starting
+	// point until the first sync from ConfigRepo overwrites it. By
+	// convention (see cmd/verify-mseg-tester's runCreate) the caller has
+	// already run this through envfile.Expand against EnvFile before
+	// setting it here, so any "${VAR}" reference in it (e.g.
+	// report.influx.token) is normally already resolved to a real value
+	// by the time this reaches BuildCreatePlan -- this field itself is
+	// just opaque text, it doesn't do any substitution on its own.
 	ConfigYAML string
 	// EnvFile is OPTIONAL -- the raw content of a local ".env" file
 	// (KEY=VALUE, see internal/envfile) to write directly to
-	// /etc/mseg-tester/.env at deploy time, 0600. This is what actually
-	// lets ConfigYAML's "${VAR}" references (e.g. report.influx.token)
-	// resolve at runtime -- bootstrap.Bootstrap.EnvFile's doc comment
+	// /etc/mseg-tester/.env at deploy time, 0600. This lets the deployed
+	// VM's own `mseg-tester run` re-resolve ConfigYAML's "${VAR}"
+	// references at runtime too (belt and suspenders alongside the
+	// create-time substitution above -- matters for -config-repo, which
+	// has no local file to substitute at create time) -- bootstrap.Bootstrap.EnvFile's doc comment
 	// already documents this file as "written once by cloud-init"; this
 	// field is what makes that true. Never fetched from ConfigRepo or any
 	// other repo -- like bootstrap.yaml itself, this is local-only and

@@ -110,54 +110,59 @@ write_files:
       segments:
         - name: "128"
           type: native   # arrives UNTAGGED on TRUNK_IFACE itself -- not a VLAN sub-interface
-          dnsServer: "192.168.128.5"
-          dnsServer6: "fd00:192:168:128::5"
           dnsCheck:
-            local:
-              tests:
-                - "mam-hh-gw.128.adviser.com."
-            remote:
-              tests:
-                - "google.com."
-          reverseCheck:
-            ip: "192.168.128.1"                    # gateway, conventionally .1
-            expect: "mam-hh-gw.128.adviser.com."
-          reverseCheck6:
-            ip: "fd00:192:168:128::1"               # IPv6 gateway, conventionally ::1
-            expect: "mam-hh-gw.128.adviser.com."
+            servers: ["system", "192.168.128.5", "fd00:192:168:128::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.mam-hh.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.mam-hh.adviser.com."   # gateway, conventionally .1
+              - type: AAAA-PTR
+                host: "mam-hh-gw.mam-hh.adviser.com."   # IPv6 gateway, conventionally ::1
+              - type: Hostname4
+                domain: "mam-hh.adviser.com."           # this segment's dynamic-DNS zone; see internal/checks' package doc
           routingCheck: "1.1.1.1:443"
           routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "129"
           type: vlan
-          dnsServer: "192.168.129.5"
-          dnsServer6: "fd00:192:168:129::5"
           dnsCheck:
-            local:
-              tests:
-                - "mam-hh-dmz.adviser.com."
-            remote:
-              tests:
-                - "google.com."
-          reverseCheck:
-            ip: "192.168.129.1"
-            expect: "mam-hh-dmz.adviser.com."
-          reverseCheck6:
-            ip: "fd00:192:168:129::1"
-            expect: "mam-hh-dmz.adviser.com."
+            servers: ["system", "192.168.129.5", "fd00:192:168:129::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.mam-hh-dmz.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.mam-hh-dmz.adviser.com."
+              - type: AAAA-PTR
+                host: "mam-hh-gw.mam-hh-dmz.adviser.com."
+              - type: Hostname4
+                domain: "mam-hh-dmz.adviser.com."
           routingCheck: "1.1.1.1:443"
           routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "130"
           type: vlan
-          dnsServer: "192.168.130.5"
-          dnsServer6: "fd00:192:168:130::5"
           dnsCheck:
-            local:
-              tests:
-                - "for-130.adviser.com."
-            remote:
-              tests:
-                - "google.com."
-                - "heise.de."
+            servers: ["system", "192.168.130.5", "fd00:192:168:130::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.for-130.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.for-130.adviser.com."
+              - type: AAAA-PTR
+                host: "mam-hh-gw.for-130.adviser.com."
+              - type: Hostname4
+                domain: "for-130.adviser.com."
           geoCheck:
             url: "https://ifconfig.co/country"
             expect: "Germany"                      # mullvad-de exit
@@ -165,15 +170,21 @@ write_files:
           routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "131"
           type: vlan
-          dnsServer: "192.168.131.5"
-          dnsServer6: "fd00:192:168:131::5"
           dnsCheck:
-            local:
-              tests:
-                - "mullvad-us.adviser.com."
-            remote:
-              tests:
-                - "google.com."
+            servers: ["system", "192.168.131.5", "fd00:192:168:131::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.mullvad-us.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.mullvad-us.adviser.com."
+              - type: AAAA-PTR
+                host: "mam-hh-gw.mullvad-us.adviser.com."
+              - type: Hostname4
+                domain: "mullvad-us.adviser.com."
           geoCheck:
             url: "https://ifconfig.co/country"
             expect: "United States"                # mullvad-us exit

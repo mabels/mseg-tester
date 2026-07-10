@@ -98,7 +98,7 @@ func runCreate(args []string) {
 	fs.StringVar(&p.ConfigRef, "config-ref", "main", "branch/tag/commit to fetch config.yaml at")
 	configToken := fs.String("config-token", "", "config-repo's PAT, given directly, if it's private (prefer -config-token-file: this appears in argv/shell history/process list)")
 	configTokenFile := fs.String("config-token-file", "", "path to a local file containing the fine-grained PAT for config-repo, if it's private")
-	envFile := fs.String("env-file", "", "path to a local .env file (KEY=VALUE, see internal/envfile) to deploy to /etc/mseg-tester/.env on the guest, 0600 -- this is what lets -config-file's \"${VAR}\" references (e.g. report.influx.token) actually resolve at runtime, instead of needing a manual copy onto the VM. Optional; never fetched from -config-repo")
+	envFile := fs.String("env-file", ".env", "path to a local .env file (KEY=VALUE, see internal/envfile) to deploy to /etc/mseg-tester/.env on the guest, 0600 -- this is what lets -config-file's \"${VAR}\" references (e.g. report.influx.token) and a CONSOLE_PASSWORD entry actually resolve/apply, instead of needing a manual copy onto the VM. Defaults to \".env\" in the current directory: read automatically if it exists there, silently skipped if not. Set to \"\" to disable entirely, or point at another path explicitly -- an explicitly-named file that doesn't exist is a hard error (unlike the default), so a typo here is never silently ignored. Never fetched from -config-repo")
 	sshKeyFile := fs.String("ssh-key-file", "", "path to a local SSH public key file to authorize for the 'ubuntu' user (recommended, for inspecting the VM)")
 	fs.StringVar(&p.SoftwareRef, "module-ref", "", "git branch/tag/commit the bootstrap script's `go install` (and every later self-update) builds -software-repo from. Defaults to \"latest\" (the newest semver tag). Point at your own branch or a commit SHA to exercise unreleased code -- no GitHub release or build pipeline needed (\"test without gh\")")
 	consolePassword := fs.String("console-password", "", "plaintext password for the 'ubuntu' user, for logging in on Proxmox's serial/VNC console independent of SSH (prefer -console-password-file, or a CONSOLE_PASSWORD entry in -env-file: this flag appears in argv/shell history/process list). Leave everything unset to leave the account password-locked -- SSH via -ssh-key-file is unaffected either way")
@@ -117,17 +117,34 @@ func runCreate(args []string) {
 		}
 		p.ConfigToken = strings.TrimSpace(string(b))
 	}
+	// -env-file defaults to ".env" -- track whether the user actually typed
+	// -env-file themselves (vs just getting the default) so a missing
+	// default file is a silent no-op (the common case: no .env in this
+	// directory, nothing to deploy) while a missing EXPLICITLY-named file
+	// is still a hard error (a typo shouldn't silently deploy nothing).
+	envFileExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "env-file" {
+			envFileExplicit = true
+		}
+	})
 	var envVars map[string]string
 	if *envFile != "" {
 		b, err := os.ReadFile(*envFile)
 		if err != nil {
-			log.Fatalf("verify-mseg-tester: reading -env-file: %v", err)
+			if os.IsNotExist(err) && !envFileExplicit {
+				b = nil // default ".env" isn't present -- nothing to deploy, not an error
+			} else {
+				log.Fatalf("verify-mseg-tester: reading -env-file: %v", err)
+			}
 		}
-		p.EnvFile = string(b)
+		if b != nil {
+			p.EnvFile = string(b)
 
-		envVars, err = envfile.Load(*envFile)
-		if err != nil {
-			log.Fatalf("verify-mseg-tester: parsing -env-file: %v", err)
+			envVars, err = envfile.Load(*envFile)
+			if err != nil {
+				log.Fatalf("verify-mseg-tester: parsing -env-file: %v", err)
+			}
 		}
 	}
 	if *configFile != "" {
@@ -135,7 +152,19 @@ func runCreate(args []string) {
 		if err != nil {
 			log.Fatalf("verify-mseg-tester: reading -config-file: %v", err)
 		}
-		p.ConfigYAML = string(b)
+		// Substitute "${VAR}" references (e.g. report.influx.token) against
+		// envVars (from -env-file) RIGHT NOW, at create time, before this
+		// content is embedded into cloud-init -- not just left for the
+		// deployed VM's own runtime `mseg-tester run` to resolve later.
+		// Both still happen (belt and suspenders: this also covers a
+		// -config-repo-fetched config.yaml later re-syncing placeholders
+		// runtime substitution alone wouldn't have caught yet), but the
+		// version actually written to /mseg-tester/config.yaml on the VM
+		// now has real values baked in immediately, rather than depending
+		// on /etc/mseg-tester/.env existing and being read correctly on
+		// first boot before anything (e.g. the very first report push)
+		// needs it resolved.
+		p.ConfigYAML = envfile.Expand(string(b), envVars)
 
 		// Derive the trunk's VLAN list and native segment from config.yaml
 		// itself (config.Segment.Type/IfName) rather than separate

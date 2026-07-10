@@ -1,0 +1,243 @@
+{
+  "title": "mseg-tester results",
+  "description": "Visualizes internal/report.PushInflux's two measurements: mseg_tester_result (one line per segment run: pass, updated, version) and mseg_tester_check (one line per individual check within that run: pass, detail). Points at whatever InfluxDB v2 bucket config.yaml's report.influx is configured to write into (examples/config.yaml default: org \"homeassistant\", bucket \"mseg-tester\").",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "tags": ["mseg-tester"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "influxdb",
+        "current": {},
+        "label": "InfluxDB datasource",
+        "refresh": 1
+      },
+      {
+        "name": "bucket",
+        "type": "textbox",
+        "label": "Bucket",
+        "current": { "value": "mseg-tester", "text": "mseg-tester" },
+        "query": "mseg-tester"
+      },
+      {
+        "name": "segment",
+        "type": "query",
+        "datasource": { "type": "influxdb", "uid": "${datasource}" },
+        "label": "Segment",
+        "query": "import \"influxdata/influxdb/v1\"\nv1.tagValues(bucket: \"${bucket}\", tag: \"segment\")",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": ["$__all"] },
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Overview",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Current status per segment",
+      "description": "Latest mseg_tester_result.pass per segment -- PASS/FAIL, colored. One series per segment tag.",
+      "datasource": { "type": "influxdb", "uid": "${datasource}" },
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_result\")\n  |> filter(fn: (r) => r._field == \"pass\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> group(columns: [\"segment\"])\n  |> last()\n  |> keep(columns: [\"_time\", \"_value\", \"segment\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "FAIL", "color": "red" }, "1": { "text": "PASS", "color": "green" } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "red" },
+              { "value": 1, "color": "green" }
+            ]
+          },
+          "noValue": "no data yet"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^_value$/", "values": false },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Latest run per segment (version / updated / age)",
+      "description": "Most recent mseg_tester_result row per segment, pivoted so pass/updated/version are columns.",
+      "datasource": { "type": "influxdb", "uid": "${datasource}" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 6 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_result\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group(columns: [\"segment\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 1)\n  |> group()\n  |> keep(columns: [\"_time\", \"segment\", \"pass\", \"updated\", \"version\"])\n  |> sort(columns: [\"segment\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pass" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              { "id": "mappings", "value": [ { "type": "value", "options": { "false": { "text": "FAIL", "color": "red" }, "true": { "text": "PASS", "color": "green" } } } ] }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "_time" },
+            "properties": [ { "id": "displayName", "value": "last run" }, { "id": "unit", "value": "dateTimeFromNow" } ]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "segment", "desc": false }] }
+    },
+    {
+      "id": 4,
+      "type": "state-timeline",
+      "title": "Segment pass/fail over time",
+      "description": "One row per segment. Green = whole batch of checks passed that cycle, red = at least one check failed (state.Result.Pass()).",
+      "datasource": { "type": "influxdb", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_result\")\n  |> filter(fn: (r) => r._field == \"pass\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> keep(columns: [\"_time\", \"_value\", \"segment\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "FAIL", "color": "red" }, "1": { "text": "PASS", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "always", "rowHeight": 0.9 }
+    },
+    {
+      "id": 5,
+      "type": "row",
+      "title": "Check-level detail",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Latest result for every check",
+      "description": "Most recent mseg_tester_check row per (segment, check) -- pass + detail, e.g. failure reason from checks.go (dns timeout, wrong geo, etc.).",
+      "datasource": { "type": "influxdb", "uid": "${datasource}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_check\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group(columns: [\"segment\", \"check\"])\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 1)\n  |> group()\n  |> keep(columns: [\"_time\", \"segment\", \"check\", \"pass\", \"detail\"])\n  |> sort(columns: [\"segment\", \"check\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "pass" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } },
+              { "id": "mappings", "value": [ { "type": "value", "options": { "false": { "text": "FAIL", "color": "red" }, "true": { "text": "PASS", "color": "green" } } } ] }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "_time" },
+            "properties": [ { "id": "displayName", "value": "last checked" }, { "id": "unit", "value": "dateTimeFromNow" } ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "detail" },
+            "properties": [ { "id": "custom.width", "value": 500 } ]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "segment", "desc": false }] }
+    },
+    {
+      "id": 7,
+      "type": "state-timeline",
+      "title": "Per-check pass/fail history",
+      "description": "Every individual check (dhcp, dhcp6, dns-local:*, dns-remote:*, reverse, reverse6, geo, routing, routing6, selfupdate) as its own row, segment prefixed. Use the segment variable above to narrow this down -- it gets crowded with all segments' checks at once.",
+      "datasource": { "type": "influxdb", "uid": "${datasource}" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 32 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_check\")\n  |> filter(fn: (r) => r._field == \"pass\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> map(fn: (r) => ({ r with series: r.segment + \" / \" + r.check }))\n  |> keep(columns: [\"_time\", \"_value\", \"series\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "FAIL", "color": "red" }, "1": { "text": "PASS", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "never", "rowHeight": 0.8 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Pass rate per segment (1h windows)",
+      "description": "Share of check batches that fully passed, aggregated hourly -- a slow-degradation signal that a single PASS/FAIL state doesn't show (e.g. a check that's flaky rather than fully broken).",
+      "datasource": { "type": "influxdb", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 44 },
+      "targets": [
+        {
+          "refId": "A",
+          "query": "from(bucket: \"${bucket}\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_result\")\n  |> filter(fn: (r) => r._field == \"pass\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value * 100.0 }))\n  |> keep(columns: [\"_time\", \"_value\", \"segment\"])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "spanNulls": false, "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "value": null, "color": "red" },
+              { "value": 50, "color": "yellow" },
+              { "value": 100, "color": "green" }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] }, "tooltip": { "mode": "multi" } }
+    }
+  ]
+}

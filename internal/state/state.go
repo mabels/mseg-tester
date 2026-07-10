@@ -26,6 +26,23 @@ import (
 type Active struct {
 	Segment string   `yaml:"segment"`
 	Cycle   []string `yaml:"cycle"`
+	// StopOn is OPTIONAL -- a segment name (matching one entry in Cycle)
+	// to park the cycle on once reached, instead of continuing to
+	// advance/reboot forever. Meant to be hand-edited into active.yaml
+	// while the cycle is already running (e.g. over SSH/console on
+	// whichever segment is currently reachable) when a specific segment
+	// needs live, sustained debugging rather than the usual brief
+	// RebootDelay window before it cycles away again.
+	//
+	// Checked once per run, after that run's own checks/result/self-
+	// update/report have all completed as normal for whichever segment
+	// is active -- only the final advance-to-next-segment/netplan-
+	// write/reboot step is skipped when Segment == StopOn. Leaving
+	// StopOn set means EVERY subsequent boot on this same segment (a
+	// manual reboot, a crash, etc.) stops again in the same place, until
+	// it's edited back out (or changed to a different segment) by hand.
+	// Empty (the default) means the cycle never stops on its own.
+	StopOn string `yaml:"stopOn,omitempty"`
 }
 
 // Next returns the segment that should follow Segment in Cycle, wrapping

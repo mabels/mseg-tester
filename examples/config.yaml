@@ -11,36 +11,60 @@
 #      on every boot on updateSegment, and changing it is a commit, not a
 #      re-provision. Only needed once you actually want that.
 #
-# dnsServer6/routingCheck6 are optional -- see internal/config's doc
-# comments. Worth setting on a dual-stack network like this one: OVN here
-# can only ever deliver a SOLICITED router advertisement (its own
-# periodic RA is unconditionally dropped -- see internal/checks' package
-# doc), so these checks double as an ongoing regression check for that,
-# not just IPv4/IPv6 parity.
+# routingCheck6 is optional -- see internal/config's doc comments. Worth
+# setting on a dual-stack network like this one: OVN here can only ever
+# deliver a SOLICITED router advertisement (its own periodic RA is
+# unconditionally dropped -- see internal/checks' package doc), so these
+# checks double as an ongoing regression check for that, not just
+# IPv4/IPv6 parity.
 #
-# dnsCheck has two independent, both-optional groups -- local and remote
-# -- each just a list of records to resolve (tests) plus an optional
-# server override:
-#   - local:  no server set -> queries BOTH dnsServer (IPv4) and
-#             dnsServer6 (IPv6, if set) for every test. Set server to
-#             query only that one address instead.
-#   - remote: no server set -> uses the system's default resolver
-#             (whatever /etc/resolv.conf points at -- normally this
-#             segment's own resolver too, via DHCP). Set server to dial
-#             a specific address instead (e.g. a public resolver).
-# Listing a real local record AND a public one (e.g. google.com) in the
-# same group's tests catches "answers its own zone but doesn't forward
-# upstream" and vice versa -- two separate, real failure modes.
+# dnsCheck is a single flat list of tests, run against a shared set of
+# "servers":
+#   - servers: which resolver(s) EVERY test below runs against, unless a
+#     test sets its own "servers" to override that for just itself. Each
+#     entry is either:
+#       * "system" -- the system's default resolver (/etc/resolv.conf,
+#         normally this segment's own resolver via DHCP)
+#       * a literal IP address (v4 or v6) -- dialed directly on port 53,
+#         bypassing resolv.conf. Any reachable address works, not just
+#         this segment's own resolver -- e.g. a public resolver like
+#         "1.1.1.1" to prove the segment can reach one, alongside the
+#         segment's own local resolver addresses below.
+#   - tests: each has a "type" plus whatever fields that type needs --
+#       * A / AAAA   -- host: resolves host as that record type; passes
+#         as soon as it gets any answer (no expected value, no round
+#         trip). Use for plain reachability checks like google.com.
+#       * A-PTR / AAAA-PTR -- host: forward-resolves host (A for A-PTR,
+#         AAAA for AAAA-PTR -- the address family is fixed by the type
+#         itself, regardless of which server answers it), reverse-
+#         resolves the first answer, and expects the PTR name to equal
+#         host -- a full forward-confirmed round trip. Use for a fixed,
+#         known-good record like a segment's own gateway.
+#       * Hostname4 / Hostname6 -- domain: same round trip as
+#         A-PTR/AAAA-PTR (forcing A or AAAA respectively), but against
+#         THIS VM's own dynamically-registered hostname
+#         (os.Hostname()+"."+domain) instead of a fixed name -- proves
+#         dynamic DNS registration (both directions) actually works for
+#         this specific roaming host, not just that the resolver can
+#         answer one known-good static record.
 #
-# reverseCheck/reverseCheck6 are optional too -- confirm the segment's own
-# resolver also answers PTR (rDNS) queries correctly, not just forward
-# ones (a resolver's forward zone can be fine while its PTR zone is
-# stale/wrong). Only set on 128/129 below: those are the two segments
-# with a real local gateway host to reverse-resolve; 130/131 are
-# WireGuard geo-exits, a different kind of check entirely (geoCheck).
-# The domain below (adviser.com) is real and intentionally public.
+# Every segment below lists its own local resolver's IPv4 and IPv6
+# addresses (conventionally <subnet>.5 / <subnet6>::5) directly in
+# "servers" alongside "system", its own local zone (A), google.com/
+# amazon.com (A, catching "answers its own zone but doesn't forward
+# upstream" vs. the reverse), an A-PTR AND an AAAA-PTR test against its
+# own gateway (conventionally .1/::1, PTR "mam-hh-gw.<segment's
+# domain>."), and a Hostname4 test against its own DDNS zone. The domain
+# used throughout (adviser.com) is real and intentionally public.
+#
+# Only "Hostname4" is used, not "Hostname6": this network has no IPv6
+# DHCP yet, so there's no dynamic AAAA/PTR6 registration for a
+# "Hostname6" test to round-trip against -- see internal/checks.go's
+# package doc. "A-PTR"/"AAAA-PTR" have no such gap (every gateway has a
+# real static IPv6 PTR record already), so both run against the full
+# segment-wide "servers" list.
 
-rebootDelay: "6m"   # only applies on updateSegment, after that segment's checks+update+report -- every other segment always reboots immediately. omit/"" for immediate everywhere.
+rebootDelay: "2m"   # applies on EVERY segment, before rebooting into the next one -- gives a window to log into the box and inspect it (e.g. a slow/hung boot) before it cycles away. Paid once PER SEGMENT, so a full cycle now takes roughly (segment count x rebootDelay) longer. omit/"" for immediate everywhere (the old default).
 
 checkAttempts: 3       # how many times to try EACH check before giving up on it. stops as soon as one attempt passes. defaults to 3 if omitted.
 checkRetryDelay: "10s" # wait between attempts of the SAME check. defaults to "10s" if omitted.
@@ -68,56 +92,61 @@ report:
 segments:
   - name: "128"
     type: native   # this trunk's untagged/native VLAN -- arrives directly on the trunk NIC, no 802.1Q tag. At most one segment may be "native"; every other segment must be "vlan".
-    dnsServer: "192.168.128.5"
-    dnsServer6: "fd00:192:168:128::5"
     dnsCheck:
-      local:
-        tests:
-          - "mam-hh-gw.128.adviser.com."
-      remote:
-        tests:
-          - "google.com."
-    reverseCheck:
-      ip: "192.168.128.1"                       # the segment's gateway -- conventionally .1
-      expect: "mam-hh-gw.128.adviser.com."
-    reverseCheck6:
-      ip: "fd00:192:168:128::1"                 # IPv6 gateway -- conventionally ::1
-      expect: "mam-hh-gw.128.adviser.com."
+      servers: ["system", "192.168.128.5", "fd00:192:168:128::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.mam-hh.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.mam-hh.adviser.com."   # the segment's gateway -- conventionally .1/::1
+        - type: AAAA-PTR
+          host: "mam-hh-gw.mam-hh.adviser.com."
+        - type: Hostname4
+          domain: "mam-hh.adviser.com."           # this segment's dynamic-DNS zone
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 
   - name: "129"
     type: vlan     # a normal 802.1Q-tagged sub-interface. ifname: is optional -- only needed if your naming convention differs from "<trunkInterface>.<name>".
-    dnsServer: "192.168.129.5"
-    dnsServer6: "fd00:192:168:129::5"
     dnsCheck:
-      local:
-        tests:
-          - "mam-hh-dmz.adviser.com."
-      remote:
-        tests:
-          - "google.com."
-    reverseCheck:
-      ip: "192.168.129.1"
-      expect: "mam-hh-dmz.adviser.com."
-    reverseCheck6:
-      ip: "fd00:192:168:129::1"
-      expect: "mam-hh-dmz.adviser.com."
+      servers: ["system", "192.168.129.5", "fd00:192:168:129::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.mam-hh-dmz.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.mam-hh-dmz.adviser.com."
+        - type: AAAA-PTR
+          host: "mam-hh-gw.mam-hh-dmz.adviser.com."
+        - type: Hostname4
+          domain: "mam-hh-dmz.adviser.com."
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 
   - name: "130"
     type: vlan
-    dnsServer: "192.168.130.5"
-    dnsServer6: "fd00:192:168:130::5"
     dnsCheck:
-      local:
-        tests:
-          - "for-130.adviser.com."
-      remote:
-        tests:
-          - "google.com."
-          - "heise.de."           # a real German site -- some sense the VPN exit's DNS forwarding also looks regionally sane
+      servers: ["system", "192.168.130.5", "fd00:192:168:130::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.for-130.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.for-130.adviser.com."
+        - type: AAAA-PTR
+          host: "mam-hh-gw.for-130.adviser.com."
+        - type: Hostname4
+          domain: "for-130.adviser.com."
     geoCheck:
       url: "https://ifconfig.co/country"
       expect: "Germany"        # mullvad-de exit
@@ -126,15 +155,21 @@ segments:
 
   - name: "131"
     type: vlan
-    dnsServer: "192.168.131.5"
-    dnsServer6: "fd00:192:168:131::5"
     dnsCheck:
-      local:
-        tests:
-          - "mullvad-us.adviser.com."
-      remote:
-        tests:
-          - "google.com."
+      servers: ["system", "192.168.131.5", "fd00:192:168:131::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.mullvad-us.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.mullvad-us.adviser.com."
+        - type: AAAA-PTR
+          host: "mam-hh-gw.mullvad-us.adviser.com."
+        - type: Hostname4
+          domain: "mullvad-us.adviser.com."
     geoCheck:
       url: "https://ifconfig.co/country"
       expect: "United States"  # mullvad-us exit

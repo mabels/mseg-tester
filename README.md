@@ -75,30 +75,44 @@ happens, not just the final summary.
    SLAAC-assigned global IPv6 address seen (not just the first) — all
    appended to the check's `Detail`, purely informational, never fails
    the check on their own.
-4. Run `dnsCheck`'s `local` and/or `remote` groups, whichever are set —
-   each is just a list of records to resolve (`tests`), with an optional
-   `server` override:
-   - `local` (no `server` set): resolves every test against BOTH of this
-     segment's own resolver addresses, `dnsServer` (IPv4) and `dnsServer6`
-     (IPv6, if set) — proves the resolver answers for its own zone, over
-     both families.
-   - `remote` (no `server` set): resolves every test via the system's
-     default resolver (whatever `/etc/resolv.conf` points at, normally
-     this segment's own resolver too via DHCP) — proves plain,
-     unconfigured resolution works, and — since `remote`'s `tests` is
-     typically a public record like `google.com.` — that the resolver
-     also forwards upstream, not just answers its own local zone.
-   - Set `server` on either group to query one specific address instead
-     of the defaults above (e.g. a public resolver like `1.1.1.1` for
-     `remote`).
+4. Run every test in `dnsCheck.tests`, whichever are set — a single flat
+   list, each test naming a `type` and running once per server in that
+   test's own `servers` (or `dnsCheck.servers` if the test doesn't
+   override it):
+   - `system` — the OS's default resolver (whatever `/etc/resolv.conf`
+     points at, normally this segment's own resolver too via DHCP) —
+     proves plain, unconfigured resolution works.
+   - a literal IP address (v4 or v6, e.g. `192.168.130.5`,
+     `fd00:192:168:130::5`, or a public resolver like `1.1.1.1`) — dialed
+     directly on port 53, bypassing `/etc/resolv.conf` — proves THIS
+     specific server answers, regardless of what the OS ended up with via
+     DHCP. Any address reachable from the segment works, not just its own
+     resolver.
 
-   Then, if `reverseCheck`/`reverseCheck6` are set, confirm that same
-   server also answers PTR queries correctly (`reverse`, `reverse6`; a
-   resolver's forward zone can be fine while its PTR zone is stale or
-   wrong, so this is a genuinely separate failure mode) — and, for
-   segments expected to exit through a specific region (a WireGuard
-   tunnel), fetch a geo-IP echo URL and confirm the response mentions the
-   right country (`geo`).
+   Each test's `type` decides both what's checked and which address
+   family it forces, regardless of which server answers it:
+   - `A` / `AAAA` — `host`: resolves as that record type, passes as soon
+     as any answer comes back. No round trip, no expected value — use
+     for plain reachability (e.g. `google.com.`, or this segment's own
+     zone, catching "answers its own zone but doesn't forward upstream"
+     vs. the reverse).
+   - `A-PTR` / `AAAA-PTR` — `host`: forward-resolves host (A or AAAA),
+     reverse-resolves the first answer, and expects the PTR name to
+     equal `host` — a full forward-confirmed reverse DNS (FCrDNS) round
+     trip against a fixed, known name (e.g. a segment's own gateway). A
+     resolver's forward zone can be fine while its PTR zone is stale or
+     wrong, so this is a genuinely separate failure mode from a plain `A`
+     test.
+   - `Hostname4` / `Hostname6` — `domain`: the same FCrDNS round trip as
+     `A-PTR`/`AAAA-PTR`, but against THIS running VM's own dynamically-
+     registered hostname (`os.Hostname()` + `domain`) instead of a fixed
+     name — proves dynamic DNS registration (both directions) actually
+     works for this specific roaming host, not just that the resolver
+     can answer one known-good static record.
+
+   For segments expected to exit through a specific region (a WireGuard
+   tunnel), `geoCheck` fetches a geo-IP echo URL and confirms the
+   response mentions the right country (`geo`).
 5. Confirm plain TCP reachability to a known external address over IPv4
    (`routing`), and over IPv6 too if `routingCheck6` is set (`routing6`)
    — proves the segment's actual egress uplink carries traffic, not just
@@ -118,11 +132,21 @@ happens, not just the final summary.
 
    Every other segment skips all of this — there's nothing to reach the
    module proxy/GitHub or the report target(s) through.
-8. Write netplan for the *next* segment in the cycle, advance
-   `active.yaml`, and reboot — **only** on `updateSegment`, first sleep
-   `config.yaml`'s `rebootDelay` (if set); every other segment reboots
-   immediately, so the delay is paid once per full cycle, not once per
-   segment.
+8. **Unless `active.yaml`'s `stopOn` equals the segment just tested**:
+   write netplan for the *next* segment in the cycle, advance
+   `active.yaml`, sleep `config.yaml`'s `rebootDelay` (if set), and
+   reboot — on **every** segment, not just `updateSegment`, so there's
+   always a window to log in and inspect the box before it cycles away.
+   Paid once *per segment*, not once per full cycle — a full cycle's
+   wall-clock time grows by roughly (segment count × `rebootDelay`).
+
+   `stopOn` is optional and not something `config.yaml`/cloud-init ever
+   sets — hand-edit it into `/mseg-tester/active.yaml` (e.g. over
+   SSH/console on whatever segment is currently reachable) when one
+   specific segment needs sustained, live debugging rather than just the
+   brief `rebootDelay` window before it cycles away again. Once set, the
+   box parks on that segment on every subsequent boot (a manual reboot,
+   a crash, etc.) until `stopOn` is edited back out or changed.
 
 ## Setup
 
@@ -222,7 +246,7 @@ handy since `config.yaml` may be fetched from a shared or even public
 
 | Field | Meaning |
 |---|---|
-| `rebootDelay` | Optional Go duration (e.g. `"6m"`) to wait, only on `updateSegment`, before rebooting into the next segment. Every other segment always reboots immediately. Omit for immediate everywhere |
+| `rebootDelay` | Optional Go duration (e.g. `"2m"`) to wait, on EVERY segment, before rebooting into the next one — gives a window to log in and inspect the box (e.g. a slow/hung boot) before it cycles away. Paid once per segment, so a full cycle's wall-clock time grows by roughly (segment count × `rebootDelay`). Omit for immediate everywhere |
 | `checkAttempts` | Optional. How many times to run the WHOLE batch of checks before giving up — if ANY check fails, the whole batch (not just that check) is re-run. Stops as soon as one full attempt passes every check. Defaults to `3` if omitted |
 | `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait before re-running the whole batch after a failure. Defaults to `"10s"` if omitted |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
@@ -230,14 +254,33 @@ handy since `config.yaml` may be fetched from a shared or even public
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether the segment becomes Proxmox `net0`'s `tag=` or `trunks=` — the single source of truth for "which segment is native" |
 | `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |
-| `segments[].dnsServer` / `.dnsServer6` | This segment's own resolver, IPv4 and (optional) IPv6. Also `dnsCheck.local`'s default server(s) — see below — and what `reverseCheck`/`reverseCheck6` query |
-| `segments[].dnsCheck.local` | Optional `{server?, tests[]}` — resolves every FQDN in `tests` against `server` if set, or otherwise BOTH `dnsServer` and `dnsServer6` (if set) — proves this segment's own resolver answers, over whichever families you configured |
-| `segments[].dnsCheck.remote` | Optional `{server?, tests[]}` — resolves every FQDN in `tests` against `server` if set, or otherwise the system's default resolver — put a public record here (e.g. `google.com.`) to prove the resolver also forwards upstream, not just answers its own zone |
-| `segments[].reverseCheck` | Optional `{ip, expect}` — confirms `dnsServer` also answers a PTR query for `ip` with `expect` (`reverse`); omit to skip |
-| `segments[].reverseCheck6` | Optional `{ip, expect}` — `reverseCheck`'s IPv6 counterpart, queried against `dnsServer6` (`reverse6`); skipped if `dnsServer6` is empty even when this is set |
+| `segments[].dnsCheck.servers` | List of servers every test in `tests` runs against by default (a test's own `servers` overrides this for just that test). Each entry is either `system` (the OS's default resolver) or a literal IP address, v4 or v6 (e.g. `192.168.130.5`, `fd00:192:168:130::5`, or a public resolver like `1.1.1.1`), dialed directly on port 53. At least one of `dnsCheck.servers` or every test's own `servers` is required |
+| `segments[].dnsCheck.tests[].type` | `A` / `AAAA` — `host` resolves as that record, passes on any answer, no round trip. `A-PTR` / `AAAA-PTR` — `host` forward-resolves (A/AAAA), reverse-resolves the first answer, and expects the PTR name to equal `host` — a full FCrDNS round trip against a fixed name (e.g. a segment's gateway); replaces the old `reverseCheck`/`reverseCheck6`. `Hostname4` / `Hostname6` — `domain` (no `host`): the same FCrDNS round trip, but against THIS VM's own dynamically-registered name (`os.Hostname()` + `domain`) instead of a fixed one, proving dynamic DNS registration works for this roaming host; replaces the old `selfDnsDomain`. Only `Hostname4` is used anywhere yet — this network has no IPv6 DHCP to drive dynamic AAAA/PTR6 registration, so `Hostname6` would just spuriously fail. The address family tested (`A`/`AAAA` vs `A-PTR`/`AAAA-PTR` vs `Hostname4`/`Hostname6`) is always fixed by `type`, never by which server answers it |
+| `segments[].dnsCheck.tests[].host` | Required for `A`/`AAAA`/`A-PTR`/`AAAA-PTR` — the name to resolve/round-trip |
+| `segments[].dnsCheck.tests[].domain` | Required for `Hostname4`/`Hostname6` — just the domain (e.g. `"mam-hh-dmz.adviser.com."`), no hostname; `os.Hostname()` supplies that part at check time |
+| `segments[].dnsCheck.tests[].servers` | Optional — overrides `dnsCheck.servers` for just this one test |
 | `segments[].geoCheck` | Optional `{url, expect}` — omit to skip |
 | `segments[].routingCheck` | `host:port` expected to be TCP-reachable (IPv4) |
 | `segments[].routingCheck6` | Optional. IPv6 equivalent, e.g. `[2606:4700:4700::1111]:443` (brackets required) — omit to skip `routing6` |
+
+## Grafana dashboard (`grafana/mseg-tester-dashboard.json`)
+
+If `report.influx` is configured, a ready-to-import Grafana dashboard is
+at `grafana/mseg-tester-dashboard.json`. It queries the two measurements
+`internal/report.PushInflux` writes — `mseg_tester_result` (one line per
+segment per cycle: `pass`, `updated`, `version`) and `mseg_tester_check`
+(one line per individual check within that cycle: `pass`, `detail`) —
+via Flux against an InfluxDB v2 datasource.
+
+Import: Grafana → Dashboards → New → Import → upload the file → pick
+your InfluxDB datasource in the `datasource` variable prompt (the
+`bucket` variable defaults to `"mseg-tester"`, matching
+`examples/config.yaml` — change it if yours differs). Panels: a
+per-segment PASS/FAIL stat row, a table of each segment's latest run
+(version/updated/age), a state-timeline of pass/fail history per
+segment, a table of every check's latest result and failure detail, a
+per-check state-timeline history, and an hourly pass-rate line (useful
+for spotting a check that's flaky rather than fully broken).
 
 ## Manual testing
 
@@ -301,10 +344,22 @@ Notes:
   is left fully untagged (every VLAN passes) since there's no local
   segment list to derive from at create-time.
 - `config.yaml` needs to come from either `-config-file` (a plain local
-  file deployed as-is — no repo or token needed, the easy path shown
-  above) or `-config-repo` (fetched/refreshed at runtime instead;
+  file — no repo or token needed, the easy path shown above) or
+  `-config-repo` (fetched/refreshed at runtime instead;
   `-config-token`/`-config-token-file` only matter if that repo is
   private). At least one of the two is required; both may be given.
+  `-config-file`'s content is **not** deployed byte-for-byte: any
+  `"${VAR}"` reference in it (e.g. `report.influx.token`) is substituted
+  against `-env-file` right now, at create time, before being embedded
+  into cloud-init — the file that lands at `/mseg-tester/config.yaml` on
+  the VM already has real values in it, it does not depend on
+  `/etc/mseg-tester/.env` existing and being read correctly on first
+  boot before it resolves. Runtime substitution (`internal/envfile`,
+  driven by the *deployed* `.env`) still also happens on every
+  `mseg-tester run` — this matters for `-config-repo`, where there's no
+  local file to substitute at create time, and as a second pass in case a
+  later config-sync reintroduces a placeholder this create-time pass
+  never saw.
 - `-module-ref` sets `bootstrap.yaml`'s `softwareRef` — the git
   branch/tag/commit the bootstrap script's `go install` (and every later
   self-update) builds `-software-repo` from. Defaults to `"latest"`.
@@ -329,15 +384,21 @@ Notes:
   private repo's PAT — the direct flag form ends up in shell history and
   `ps` output. The same reasoning applies to `-console-password-file`
   over `-console-password`.
-- `-env-file` (optional) deploys a local `.env` file (`KEY=VALUE`, see
+- `-env-file` deploys a local `.env` file (`KEY=VALUE`, see
   `internal/envfile`) to `/etc/mseg-tester/.env` on the guest, `0600`.
   This is what actually resolves `config.yaml`'s `"${VAR}"` references
-  (e.g. `report.influx.token`) at runtime — without it, those references
-  are only ever resolved from the shell's own environment when
-  `mseg-tester run` happens to have one (normally it won't, running under
-  systemd), so the placeholder stays literal. Never fetched from
-  `-config-repo` or synced anywhere — like `bootstrap.yaml` itself, it's
-  local-only and provisioned once, by hand, per VM.
+  (e.g. `report.influx.token`) at runtime and feeds the `CONSOLE_PASSWORD`
+  fallback above — without it, those references are only ever resolved
+  from the shell's own environment when `mseg-tester run` happens to have
+  one (normally it won't, running under systemd), so the placeholder
+  stays literal. **Defaults to `".env"` in the current directory** — read
+  automatically if present, silently skipped if not (the common case: no
+  `.env` next to where you run `create`). Pass `-env-file ""` to disable
+  entirely, or point it at another path explicitly — unlike the default,
+  an explicitly-named file that doesn't exist is a hard error, so a typo
+  is never silently ignored. Never fetched from `-config-repo` or synced
+  anywhere — like `bootstrap.yaml` itself, it's local-only and
+  provisioned once, by hand, per VM.
 
 ## License
 

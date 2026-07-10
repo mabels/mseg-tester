@@ -33,8 +33,16 @@
 //	                             differs (internal/selfupdate), then POSTs
 //	                             every accumulated result to
 //	                             config.Report.URL if set (internal/report),
-//	                          6. writes netplan for the NEXT segment in the
-//	                             cycle, waits config.RebootDelay, reboots.
+//	                          6. unless active.yaml's StopOn equals the
+//	                             segment just tested (see
+//	                             state.Active.StopOn): writes netplan for
+//	                             the NEXT segment in the cycle, waits
+//	                             config.RebootDelay (every segment, not
+//	                             just the update one -- gives a login
+//	                             window before it cycles away), reboots.
+//	                             StopOn is hand-edited into active.yaml to
+//	                             park the cycle on one segment for
+//	                             sustained live debugging instead.
 //
 //	-verbose logs each of the above steps, and every individual check's
 //	pass/fail/detail, as they happen -- handy when watching a live serial
@@ -251,6 +259,21 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		}
 	}
 
+	// StopOn (state.Active.StopOn) parks the cycle here instead of
+	// advancing/rebooting -- this run's own checks/result/self-update/
+	// report above already happened as normal; only the step that would
+	// move on to the NEXT segment is skipped. See state.Active.StopOn's
+	// doc comment for how this gets set (hand-edited into active.yaml
+	// while the cycle is already running) and why (sustained live
+	// debugging on one specific segment, e.g. over SSH/console, instead
+	// of only the brief RebootDelay window before it cycles away again).
+	if active.StopOn != "" && active.StopOn == active.Segment {
+		if verbose {
+			log.Printf("run: stopOn %q reached -- staying on segment %s, not advancing or rebooting", active.StopOn, active.Segment)
+		}
+		return nil
+	}
+
 	next := active.Next()
 	nextSeg, ok := cfg.BySegmentName(next)
 	if !ok {
@@ -272,19 +295,20 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		return nil
 	}
 
-	// RebootDelay only ever applies on updateSegment -- every other
-	// segment has nothing to wait for (no self-update/config-sync/report
-	// happens there, see applyUpdateCheck above) and should cycle straight
-	// through to the next reboot as fast as possible. Pausing there too
-	// would multiply the whole cycle's wall-clock time by the segment
-	// count for no reason.
-	if active.Segment == boot.UpdateSegment {
-		if delay := cfg.RebootDelayDuration(); delay > 0 {
-			if verbose {
-				log.Printf("run: sleeping %s before reboot (rebootDelay, updateSegment only)", delay)
-			}
-			time.Sleep(delay)
+	// RebootDelay now applies on EVERY segment, not just updateSegment --
+	// deliberately changed from the original "updateSegment only" design
+	// (see config.Config.RebootDelay's doc comment) so there's a real
+	// window to SSH/console into the box and inspect it before it cycles
+	// away, on WHATEVER segment turns out to need debugging (e.g. a slow
+	// or hung boot on a non-update segment -- the whole reason this was
+	// changed). The cost: total per-cycle wall-clock time is now
+	// (segment count x RebootDelay), not paid just once -- pick a value
+	// that's fine to pay per segment, not just once per cycle.
+	if delay := cfg.RebootDelayDuration(); delay > 0 {
+		if verbose {
+			log.Printf("run: sleeping %s before reboot (rebootDelay, every segment)", delay)
 		}
+		time.Sleep(delay)
 	}
 
 	if verbose {
