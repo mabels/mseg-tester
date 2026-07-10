@@ -133,6 +133,9 @@ func TestRenderWifiSegment(t *testing.T) {
 	if !strings.Contains(out, "activation-mode: off") {
 		t.Errorf("expected the trunk NIC forced off via activation-mode: off, got:\n%s", out)
 	}
+	if !strings.Contains(out, "link-local: []") {
+		t.Errorf("expected the trunk NIC's link-local address assignment also disabled, got:\n%s", out)
+	}
 	assertValidNetplanYAML(t, out)
 }
 
@@ -165,6 +168,9 @@ func TestRenderVLANSegmentDisablesWifiIface(t *testing.T) {
 	if !strings.Contains(out, "wlan0:") || !strings.Contains(out, "activation-mode: off") {
 		t.Errorf("expected wlan0 explicitly forced off, got:\n%s", out)
 	}
+	if !strings.Contains(out, "link-local: []") {
+		t.Errorf("expected wlan0's link-local address assignment also disabled, got:\n%s", out)
+	}
 	assertValidNetplanYAML(t, out)
 }
 
@@ -174,6 +180,9 @@ func TestRenderNativeSegmentDisablesWifiIface(t *testing.T) {
 
 	if !strings.Contains(out, "wifis:") || !strings.Contains(out, "wlan0:") || !strings.Contains(out, "activation-mode: off") {
 		t.Errorf("expected wlan0 explicitly forced off, got:\n%s", out)
+	}
+	if !strings.Contains(out, "link-local: []") {
+		t.Errorf("expected wlan0's link-local address assignment also disabled, got:\n%s", out)
 	}
 	assertValidNetplanYAML(t, out)
 }

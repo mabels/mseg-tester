@@ -75,11 +75,18 @@ func yamlDoubleQuote(s string) string {
 // under both an "ethernets:" and a "wifis:" stanza (the schema for both
 // is otherwise the same set of keys). See disableWifiIfaces' doc comment
 // on Render for why this is needed at all, rather than just omitting the
-// device.
+// device. link-local: [] turns off netplan/systemd-networkd's own
+// default IPv6 link-local address assignment too -- activation-mode: off
+// keeps the device from being brought up at all under normal operation,
+// but leaving link-local on its default ["ipv6"] is still one more way
+// this "off" device could end up participating on the network (an
+// fe80:: address alone is enough for local discovery/neighbor traffic)
+// that's cheap to also explicitly close off here rather than relying on
+// activation-mode alone.
 func offDeviceEntries(names []string) string {
 	var b strings.Builder
 	for _, name := range names {
-		fmt.Fprintf(&b, "    %s:\n      dhcp4: false\n      dhcp6: false\n      activation-mode: off\n", name)
+		fmt.Fprintf(&b, "    %s:\n      dhcp4: false\n      dhcp6: false\n      link-local: []\n      activation-mode: off\n", name)
 	}
 	return b.String()
 }
