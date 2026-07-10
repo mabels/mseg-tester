@@ -156,6 +156,23 @@ happens, not just the final summary.
 VM, one NIC, set as a trunk port carrying VLANs 128/129/130/131. Attach
 `cloud-init/user-data.yaml` as the VM's cloud-init user-data.
 
+**Optional, also one-time, in Proxmox**: for any `type: wifi` segment, PCI
+(or USB) passthrough a dedicated Wi-Fi radio to the VM (`hostpci0:
+0000:xx:xx.x` in the VM's config) — needs IOMMU/VFIO already enabled on
+the host, and the radio isolated in its own IOMMU group. Not automated by
+this tool any more than the trunk port is; check `lspci -nnk` and
+`/sys/kernel/iommu_groups/` on the host first. Once passed through, the
+guest sees it as a normal wireless NIC — but PCI passthrough gives no
+guarantee the guest names it the same thing on every boot, so pick one of
+three ways to identify it in `config.yaml` rather than hardcoding a name:
+a literal `segments[].ifname` (only safe if you've confirmed it's
+stable), `segments[].mac`, or `segments[].pciVendor`+`segments[].pciDevice`
+(read straight off the guest's `lspci -nn`, survives interface renames).
+Leave all three unset and it auto-picks the first wireless interface it
+finds — fine when there's only one radio passed through. Run `mseg-tester
+find-iface` on the guest to check what any of these would resolve to
+before committing it to `config.yaml` (see the Subcommands table below).
+
 Before using it, edit `cloud-init/user-data.yaml`'s `bootstrap.yaml`
 block:
 
@@ -171,6 +188,10 @@ block:
   read-only, scoped to *only* that repo (leave `configToken` empty if
   the repo is public). Treat `configToken` with the same care as any
   other credential-bearing file.
+- If any segment is `type: wifi`, also fill in its real `ssid` and the
+  matching `WIFI_<segment name>_SSID`/`_PSK` pair in the `/etc/mseg-tester/.env`
+  write_files entry (cloud-init/user-data.yaml ships this pre-wired but
+  with `REPLACE_ME` placeholders — they will **not** resolve on their own).
 
 First boot brings up segment 129 directly (the only one cloud-init itself
 can reach the internet through), installs the Go toolchain from the
@@ -216,6 +237,7 @@ at all.
 | `mseg-tester deploy` | Once, from the cloud-init bootstrap script, after the binary is first downloaded | Copies itself to `/usr/local/bin`, writes and enables the systemd unit (`internal/deploy`) |
 | `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/etc/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
 | `mseg-tester render-netplan -config path -segment name [-trunk-iface name]` | Whenever you want to eyeball a segment's netplan | Prints exactly what `internal/netplan.Write` would install for that segment, from a local `config.yaml` — no VM, no network, no shell-on-the-box needed. Handy when a box is stuck at boot (e.g. `systemd-networkd-wait-online`) and unreachable: run this locally against the same `config.yaml` instead |
+| `mseg-tester find-iface [-mac addr] [-pci-vendor id -pci-device id]` | On the guest, whenever you want to check what a `"wifi"` segment's `mac`/`pciVendor`+`pciDevice` (or auto-discovery, if none of the flags are given) would resolve to right now | Runs the same `internal/ifdiscover` resolution a `"wifi"` segment goes through at boot, and prints the resulting interface name (or the error you'd otherwise only see in a failed cycle's logs) — a fast way to sanity-check a MAC or PCI vendor/device pair against the guest's actual hardware before putting it in `config.yaml` |
 
 ## `bootstrap.yaml` reference (`/etc/mseg-tester/bootstrap.yaml`)
 
@@ -255,8 +277,21 @@ handy since `config.yaml` may be fetched from a shared or even public
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket`, typically written as `"${INFLUX_TOKEN}"` (see the `"${VAR}"` expansion note above) rather than a literal value — see `internal/report.PushInflux` and `examples/config.yaml` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
-| `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag) or `"vlan"` (a normal tagged sub-interface). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether `net0` gets `trunks=` at all — the single source of truth for "which segment is native". If any segment is `"native"`, `net0` is created with **no** `tag=`/`trunks=` whatsoever (see `internal/verifyvm.Params.net0`'s doc comment: on an OVS bridge, Proxmox's `tag=` for a genuinely-untagged VLAN misroutes it — confirmed live) — every VLAN reaches the guest untouched and `internal/netplan.Write` does the demuxing on the guest side |
-| `segments[].ifname` | Optional. Overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one) |
+| `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag), `"vlan"` (a normal tagged sub-interface), or `"wifi"` (a dedicated Wi-Fi radio passed through to this VM, associating to `ssid`/`psk` instead of riding any VLAN at all). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether `net0` gets `trunks=` at all — the single source of truth for "which segment is native", and (via `Config.VLANSegmentNames`) which segments are VLANs at all, since a `"wifi"` segment's `name` isn't a VLAN ID and must never end up in `trunks=`. If any segment is `"native"`, `net0` is created with **no** `tag=`/`trunks=` whatsoever (see `internal/verifyvm.Params.net0`'s doc comment: on an OVS bridge, Proxmox's `tag=` for a genuinely-untagged VLAN misroutes it — confirmed live) — every VLAN reaches the guest untouched and `internal/netplan.Write` does the demuxing on the guest side. A `"wifi"` segment cycles through `active.yaml`/`rebootDelay`/reporting exactly like any other segment — reassociating over Wi-Fi doesn't need a reboot the way switching VLANs does, but testing it via the same cold-boot cycle as everything else is deliberate, not a limitation |
+| `segments[].ifname` | For `"native"`/`"vlan"`: optional, overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one). For `"wifi"`: optional — if set, used literally and takes priority over `mac`/`pciVendor`+`pciDevice`/auto-discovery below. There's no trunk-derived default for a standalone radio, so leave it unset unless you've confirmed the guest names it the same thing on every boot |
+| `segments[].mac` | `"wifi"` only, optional — resolves to whichever interface currently has this MAC address (`internal/ifdiscover`), checked at every boot rather than assumed stable. Ignored if `ifname` is also set |
+| `segments[].pciVendor` | `"wifi"` only, optional, must be paired with `pciDevice` (both set or both empty) — resolves to whichever interface is bound to the PCI device with this vendor ID (hex, e.g. `"14c3"`), read from the guest's `/sys/bus/pci/devices/*/vendor` (same values `lspci -nn` shows). Ignored if `ifname` is also set |
+| `segments[].pciDevice` | `"wifi"` only, optional, must be paired with `pciVendor` — the PCI device ID (hex, e.g. `"0616"`) |
+| `segments[].ssid` | Required for `"wifi"`, ignored otherwise — the network name to associate to |
+| `segments[].psk` | Required for `"wifi"`, ignored otherwise — the network's password. Written as `"${VAR}"` and expanded the same way `report.influx.token` is (see the `"${VAR}"` expansion note above); this project's own convention is `WIFI_<segment name>_SSID`/`WIFI_<segment name>_PSK` in `.env`, e.g. `WIFI_128_SSID`/`WIFI_128_PSK` for a segment named `"wifi-128"` mirroring segment `"128"`'s checks — not enforced by code, just a naming convention |
+
+A `"wifi"` segment's interface is resolved (`internal/ifdiscover`) in this
+priority order, first match wins: literal `ifname`, then `mac`, then
+`pciVendor`+`pciDevice`, then — if none of those are set — auto-discovery
+of the first wireless interface found on the guest. Resolution happens
+fresh on every attempt (both when writing netplan and when running
+checks), not just once at boot, so a MAC/PCI-identified radio keeps
+working even if the guest renames it between boots.
 | `segments[].dnsCheck.servers` | List of servers every test in `tests` runs against by default (a test's own `servers` overrides this for just that test). Each entry is either `system` (the OS's default resolver) or a literal IP address, v4 or v6 (e.g. `192.168.130.5`, `fd00:192:168:130::5`, or a public resolver like `1.1.1.1`), dialed directly on port 53. At least one of `dnsCheck.servers` or every test's own `servers` is required |
 | `segments[].dnsCheck.tests[].type` | `A` / `AAAA` — `host` resolves as that record, passes on any answer, no round trip. `A-PTR` / `AAAA-PTR` — `host` forward-resolves (A/AAAA), reverse-resolves the first answer, and expects the PTR name to equal `host` — a full FCrDNS round trip against a fixed name (e.g. a segment's gateway); replaces the old `reverseCheck`/`reverseCheck6`. `Hostname4` / `Hostname6` — `domain` (no `host`): the same FCrDNS round trip, but against THIS VM's own dynamically-registered name (`os.Hostname()` + `domain`) instead of a fixed one, proving dynamic DNS registration works for this roaming host; replaces the old `selfDnsDomain`. Only `Hostname4` is used anywhere yet — this network has no IPv6 DHCP to drive dynamic AAAA/PTR6 registration, so `Hostname6` would just spuriously fail. The address family tested (`A`/`AAAA` vs `A-PTR`/`AAAA-PTR` vs `Hostname4`/`Hostname6`) is always fixed by `type`, never by which server answers it |
 | `segments[].dnsCheck.tests[].host` | Required for `A`/`AAAA`/`A-PTR`/`AAAA-PTR` — the name to resolve/round-trip |
@@ -339,13 +374,18 @@ Notes:
 - There are no `-trunk-vlans`/`-native-segment` flags — the Proxmox NIC's
   trunked VLAN list and, if any, its native/untagged VLAN are both derived
   automatically from `-config-file`'s `segments[].name`/`.type`
-  (`internal/config.Config.CycleNames`/`.NativeSegmentName`), the same
-  `type: native`/`type: vlan` fields that drive the guest-side interface
-  naming (`internal/netplan.IfaceName`) — one source of truth instead of
-  two lists to keep in sync by hand. If you use `-config-repo` instead
-  (config.yaml fetched at runtime, not given as a local file), the trunk
-  is left fully untagged (every VLAN passes) since there's no local
-  segment list to derive from at create-time.
+  (`internal/config.Config.VLANSegmentNames`/`.NativeSegmentName`), the
+  same `type: native`/`type: vlan` fields that drive the guest-side
+  interface naming (`internal/netplan.IfaceName`) — one source of truth
+  instead of two lists to keep in sync by hand. `VLANSegmentNames`
+  deliberately excludes any `type: wifi` segments (their `name` isn't a
+  VLAN ID and never rides the trunk NIC at all — see
+  `segments[].type` above); the full segment list including `wifi` ones
+  still seeds the guest's reboot cycle via `Config.CycleNames`, just not
+  the Proxmox trunk. If you use `-config-repo` instead (config.yaml
+  fetched at runtime, not given as a local file), the trunk is left fully
+  untagged (every VLAN passes) since there's no local segment list to
+  derive from at create-time.
 - If any segment is `type: native`, `net0` is generated with **no**
   `tag=`/`trunks=` at all, not `tag=<native>,trunks=<rest>` — on an OVS
   bridge, giving the untagged segment an explicit `tag=` routes it

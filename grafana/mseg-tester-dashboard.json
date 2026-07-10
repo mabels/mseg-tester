@@ -62,6 +62,17 @@
           "query": "from(bucket: \"${bucket}\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"mseg_tester_result\")\n  |> filter(fn: (r) => r._field == \"pass\")\n  |> filter(fn: (r) => contains(value: r.segment, set: ${segment:json}))\n  |> group(columns: [\"segment\"])\n  |> last()\n  |> keep(columns: [\"_time\", \"_value\", \"segment\"])"
         }
       ],
+      "transformations": [
+        {
+          "id": "convertFieldType",
+          "options": {
+            "fields": {},
+            "conversions": [
+              { "targetField": "Value", "destinationType": "number" }
+            ]
+          }
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "mappings": [
@@ -79,7 +90,7 @@
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "/^_value$/", "values": false },
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true },
         "orientation": "horizontal",
         "textMode": "value_and_name",
         "colorMode": "background",
@@ -134,7 +145,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "FAIL", "color": "red" }, "1": { "text": "PASS", "color": "green" } } }
+            { "type": "value", "options": { "false": { "text": "FAIL", "color": "red" }, "true": { "text": "PASS", "color": "green" } } }
           ]
         },
         "overrides": []
@@ -200,7 +211,7 @@
       "fieldConfig": {
         "defaults": {
           "mappings": [
-            { "type": "value", "options": { "0": { "text": "FAIL", "color": "red" }, "1": { "text": "PASS", "color": "green" } } }
+            { "type": "value", "options": { "false": { "text": "FAIL", "color": "red" }, "true": { "text": "PASS", "color": "green" } } }
           ]
         },
         "overrides": []

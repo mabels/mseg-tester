@@ -181,7 +181,7 @@ func runCreate(args []string) {
 		if err != nil {
 			log.Fatalf("verify-mseg-tester: parsing -config-file: %v", err)
 		}
-		p.TrunkVLANs = parsedCfg.CycleNames()
+		p.TrunkVLANs = parsedCfg.VLANSegmentNames()
 		if native, ok := parsedCfg.NativeSegmentName(); ok {
 			p.NativeSegment = native
 		}

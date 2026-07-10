@@ -31,6 +31,7 @@ import (
 
 	"github.com/mabels/mseg-tester/internal/config"
 	"github.com/mabels/mseg-tester/internal/ifaces"
+	"github.com/mabels/mseg-tester/internal/ifdiscover"
 	"github.com/mabels/mseg-tester/internal/state"
 )
 
@@ -121,13 +122,36 @@ func runOnce(seg config.Segment, verbose bool) []state.CheckResult {
 	return results
 }
 
+// resolveIfNameFn is a var, not a direct call, so tests can fake
+// hardware discovery without touching the real filesystem -- same seam
+// pattern as runOnceFn above and internal/selfupdate's goInstall var.
+var resolveIfNameFn = ifdiscover.ResolveIfName
+
 // discoverIface finds seg's real, currently-running interface via
 // internal/ifaces -- a fresh `ip a` snapshot taken once per attempt and
 // shared by dhcpCheck/dhcp6Check, rather than assuming a name from
-// config. A failure here (couldn't even list interfaces) is carried into
-// both dhcp/dhcp6 as their own failing result -- everything else below
-// doesn't depend on it.
+// config.
+//
+// For a "wifi" segment, seg.IfName may be empty (see config.Segment.IfName's
+// doc comment -- "auto", or identified by MAC/PCI instead of a literal
+// name) -- resolved fresh via internal/ifdiscover (resolveIfNameFn) on
+// EVERY call, not just once. That's deliberate, not wasted work: Run
+// calls discoverIface once per attempt already, via runOnce, so a
+// passthrough radio whose driver is still binding at the moment of the
+// first attempt gets picked up on a later one for free, riding Run's
+// existing retryDelay -- no separate retry loop needed here.
+//
+// A failure here (couldn't resolve the interface name, or couldn't even
+// list interfaces) is carried into both dhcp/dhcp6 as their own failing
+// result -- everything else below doesn't depend on it.
 func discoverIface(seg config.Segment) (ifaces.Iface, error) {
+	if seg.Type == "wifi" {
+		resolved, err := resolveIfNameFn(seg.IfName, seg.MAC, seg.PCIVendor, seg.PCIDevice)
+		if err != nil {
+			return ifaces.Iface{}, fmt.Errorf("resolving wifi interface: %w", err)
+		}
+		seg.IfName = resolved
+	}
 	list, err := ifaces.List()
 	if err != nil {
 		return ifaces.Iface{}, err

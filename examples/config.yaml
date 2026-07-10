@@ -63,6 +63,29 @@
 # package doc. "A-PTR"/"AAAA-PTR" have no such gap (every gateway has a
 # real static IPv6 PTR record already), so both run against the full
 # segment-wide "servers" list.
+#
+# A segment may also be type: wifi -- a dedicated Wi-Fi radio passed
+# through to this VM, associating to ssid/psk instead of riding any VLAN
+# at all. Unlike "native"/"vlan", there's no trunk-derived default
+# interface name -- instead pick ONE of three ways to identify the radio
+# (internal/ifdiscover.Find, checked in this priority order): ifname (a
+# literal name, e.g. "wlan0" -- simplest, but only stays correct until
+# something reshuffles this VM's virtual PCI slot numbering and udev
+# renames it), mac (a hardware address -- stable across that), or
+# pciVendor+pciDevice (ditto, via PCI vendor:device ID -- what's used
+# below, since it's what `lspci -nnk` on the Proxmox host shows before
+# passthrough even happens, no need to boot the VM once just to read its
+# MAC first). Leaving all three unset means "auto" -- the first Wi-Fi-
+# capable interface found, whatever that turns out to be; fine with only
+# one radio in the machine, ambiguous with more than one. `mseg-tester
+# find-iface` resolves any of these standalone, for checking by hand.
+#
+# psk is written as "${VAR}" and expanded the same way report.influx.token
+# is -- see internal/config.Segment.PSK's doc comment; this project's own
+# convention is WIFI_<segment name>_SSID/WIFI_<segment name>_PSK in .env,
+# e.g. WIFI_128_SSID/WIFI_128_PSK below. Each wifi-* segment here mirrors
+# its same-numbered VLAN segment's checks -- same destination network,
+# same expected geo, just reached over the air instead of over the wire.
 
 rebootDelay: "2m"   # applies on EVERY segment, before rebooting into the next one -- gives a window to log into the box and inspect it (e.g. a slow/hung boot) before it cycles away. Paid once PER SEGMENT, so a full cycle now takes roughly (segment count x rebootDelay) longer. omit/"" for immediate everywhere (the old default).
 
@@ -112,6 +135,30 @@ segments:
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 
+  - name: "wifi-128"
+    type: wifi                    # dedicated Wi-Fi radio, not a VLAN -- see the note above
+    pciVendor: "14c3"             # MediaTek MT7922 -- identifies the physical card, stable across a PCI-slot renumbering an ifname: literal wouldn't survive; see the note above
+    pciDevice: "0616"
+    ssid: "${WIFI_128_SSID}"
+    psk: "${WIFI_128_PSK}"
+    dnsCheck:                     # same expectations as segment "128" -- same destination network, reached over the air
+      servers: ["system", "192.168.128.5", "fd00:192:168:128::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.mam-hh.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.mam-hh.adviser.com."
+        - type: AAAA-PTR
+          host: "mam-hh-gw.mam-hh.adviser.com."
+        - type: Hostname4
+          domain: "mam-hh.adviser.com."
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"
+
   - name: "129"
     type: vlan     # a normal 802.1Q-tagged sub-interface. ifname: is optional -- only needed if your naming convention differs from "<trunkInterface>.<name>".
     dnsCheck:
@@ -155,8 +202,62 @@ segments:
     routingCheck: "1.1.1.1:443"
     routingCheck6: "[2606:4700:4700::1111]:443"
 
+  - name: "wifi-130"
+    type: wifi
+    pciVendor: "14c3"   # MediaTek MT7922 -- same physical radio as wifi-128
+    pciDevice: "0616"
+    ssid: "${WIFI_130_SSID}"
+    psk: "${WIFI_130_PSK}"
+    dnsCheck:
+      servers: ["system", "192.168.130.5", "fd00:192:168:130::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.for-130.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.for-130.adviser.com."
+        - type: AAAA-PTR
+          host: "mam-hh-gw.for-130.adviser.com."
+        - type: Hostname4
+          domain: "for-130.adviser.com."
+    geoCheck:
+      url: "https://ifconfig.co/country"
+      expect: "Germany"        # mullvad-de exit
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"
+
   - name: "131"
     type: vlan
+    dnsCheck:
+      servers: ["system", "192.168.131.5", "fd00:192:168:131::5"]
+      tests:
+        - type: A
+          host: "mam-hh-gw.mullvad-us.adviser.com."
+        - type: A
+          host: "google.com."
+        - type: A
+          host: "amazon.com."
+        - type: A-PTR
+          host: "mam-hh-gw.mullvad-us.adviser.com."
+        - type: AAAA-PTR
+          host: "mam-hh-gw.mullvad-us.adviser.com."
+        - type: Hostname4
+          domain: "mullvad-us.adviser.com."
+    geoCheck:
+      url: "https://ifconfig.co/country"
+      expect: "United States"  # mullvad-us exit
+    routingCheck: "1.1.1.1:443"
+    routingCheck6: "[2606:4700:4700::1111]:443"
+
+  - name: "wifi-131"
+    type: wifi
+    pciVendor: "14c3"   # MediaTek MT7922 -- same physical radio as wifi-128
+    pciDevice: "0616"
+    ssid: "${WIFI_131_SSID}"
+    psk: "${WIFI_131_PSK}"
     dnsCheck:
       servers: ["system", "192.168.131.5", "fd00:192:168:131::5"]
       tests:

@@ -113,22 +113,66 @@ type Segment struct {
 	// already use the VLAN ID as the name (see topology.ts), and there's
 	// no reason for this tool to invent a second identifier scheme.
 	Name string `yaml:"name"`
-	// Type is either "native" (this trunk's untagged/native VLAN -- its
-	// traffic arrives directly on the trunk interface, no 802.1Q tag at
-	// all) or "vlan" (a normal 802.1Q-tagged sub-interface, the common
-	// case). Required on every segment: at most one may be "native" (a
-	// trunk has at most one native VLAN), enforced by Load. Drives
-	// interface naming (internal/netplan.IfaceName) AND, for
-	// cmd/verify-mseg-tester, which VLAN becomes the Proxmox NIC's
-	// "tag=" vs. "trunks=" -- this field is the single source of truth
-	// for "which segment is native," replacing what used to be a
-	// separate, hand-kept bootstrap.yaml field of the same meaning.
+	// Type is "native" (this trunk's untagged/native VLAN -- its traffic
+	// arrives directly on the trunk interface, no 802.1Q tag at all),
+	// "vlan" (a normal 802.1Q-tagged sub-interface, the common case), or
+	// "wifi" (a dedicated Wi-Fi radio passed through to this VM,
+	// associating to SSID/PSK below instead of carrying any VLAN at all).
+	// Required on every segment: at most one may be "native" (a trunk has
+	// at most one native VLAN), enforced by Load. Drives interface naming
+	// (internal/netplan.IfaceName) AND, for cmd/verify-mseg-tester, which
+	// VLAN becomes the Proxmox NIC's "tag=" vs. "trunks=" (wifi segments
+	// don't participate in that at all -- they're not on the trunk NIC)
+	// -- this field is the single source of truth for "which segment is
+	// native," replacing what used to be a separate, hand-kept
+	// bootstrap.yaml field of the same meaning.
 	Type string `yaml:"type"`
-	// IfName is OPTIONAL -- overrides the interface name
-	// internal/netplan.IfaceName would otherwise derive (normally
-	// "<trunkInterface>" for the native segment, "<trunkInterface>.<Name>"
-	// for a tagged one). Only needed if your naming convention differs.
+	// IfName overrides the interface name internal/netplan.IfaceName
+	// would otherwise derive (normally "<trunkInterface>" for the native
+	// segment, "<trunkInterface>.<Name>" for a tagged one). OPTIONAL for
+	// "native"/"vlan" -- only needed if your naming convention differs.
+	//
+	// For "wifi", there's no trunk-derived default at all, so this is one
+	// of THREE ways to identify the radio (internal/ifdiscover.Find),
+	// checked in this priority order: IfName (a literal name, e.g.
+	// "wlan0" -- skips discovery entirely, but only stays correct until
+	// something reshuffles this VM's virtual PCI slot numbering and udev
+	// renames it); MAC (a specific card's hardware address -- stable
+	// across that, since it's a fact about the physical card, not this
+	// boot's virtual bus enumeration); PCIVendor+PCIDevice (ditto, via
+	// vendor:device ID instead of MAC); or, if none of the three are set,
+	// "auto" -- the first Wi-Fi-capable interface found at all. None are
+	// required; a "wifi" segment with all four unset just means "auto".
 	IfName string `yaml:"ifname,omitempty"`
+	// MAC is one of three OPTIONAL ways to identify a "wifi" segment's
+	// radio when IfName isn't set -- see IfName's doc comment for the
+	// full priority order. The interface's hardware address, e.g.
+	// "90:7a:be:dc:34:a9" (as shown by `ip link` on whatever host the
+	// physical card was in before passthrough, or on the guest once it's
+	// up once).
+	MAC string `yaml:"mac,omitempty"`
+	// PCIVendor and PCIDevice are the other OPTIONAL identification
+	// method -- see IfName's doc comment. Both must be set together (Load
+	// rejects just one) -- the PCI vendor:device ID pair of the physical
+	// card, hex, with or without a "0x" prefix, e.g. "14c3"/"0616" for a
+	// MediaTek MT7922 (`lspci -nnk` on the Proxmox host, before
+	// passthrough, shows this as "[14c3:0616]").
+	PCIVendor string `yaml:"pciVendor,omitempty"`
+	PCIDevice string `yaml:"pciDevice,omitempty"`
+	// SSID is REQUIRED when Type is "wifi" (ignored otherwise) -- the
+	// network name internal/netplan.Render's wifi branch associates to.
+	SSID string `yaml:"ssid,omitempty"`
+	// PSK is REQUIRED when Type is "wifi" (ignored otherwise) -- the
+	// network's password. Written as "${VAR}" (e.g. "${WIFI_128_PSK}")
+	// and expanded at Load time the same way report.influx.token is --
+	// see Load's doc comment and internal/envfile -- so the literal
+	// secret lives only in a local .env file, never in config.yaml
+	// itself. Convention used throughout this project's own config:
+	// WIFI_<segment name>_SSID / WIFI_<segment name>_PSK, e.g.
+	// WIFI_128_SSID/WIFI_128_PSK for the segment named "128"'s Wi-Fi
+	// counterpart -- not enforced by code, just a naming convention that
+	// keeps each pair unambiguous at a glance in .env.
+	PSK string `yaml:"psk,omitempty"`
 	// DNSCheck configures every DNS test for this segment -- forward
 	// lookups, gateway PTR round trips, and this VM's own dynamic-DNS
 	// round trip are all just different DNSTest.Type values in one flat
@@ -286,11 +330,34 @@ func (c Config) BySegmentName(name string) (Segment, bool) {
 }
 
 // CycleNames returns every declared segment's Name, in the order given in
-// config.yaml -- used to seed active.yaml on first boot.
+// config.yaml -- used to seed active.yaml on first boot. Deliberately
+// includes "wifi" segments alongside "native"/"vlan" ones: the reboot
+// cycle itself doesn't care what carries a segment's traffic, only
+// internal/netplan.Render (branching on Type) and cmd/verify-mseg-tester's
+// Proxmox trunk derivation (VLANSegmentNames below) do.
 func (c Config) CycleNames() []string {
 	names := make([]string, len(c.Segments))
 	for i, s := range c.Segments {
 		names[i] = s.Name
+	}
+	return names
+}
+
+// VLANSegmentNames returns every "native"/"vlan" segment's Name, in
+// declaration order, EXCLUDING "wifi" segments -- used by
+// cmd/verify-mseg-tester to derive the Proxmox trunk NIC's VLAN list
+// (Params.TrunkVLANs). A "wifi" segment's Name isn't a VLAN ID at all (it
+// never rides the trunk NIC -- see config.Segment.Type's doc comment), so
+// including it in "trunks=" would be meaningless at best and a Proxmox
+// error at worst. Use CycleNames instead wherever every segment
+// (including wifi) genuinely belongs, e.g. seeding active.yaml's cycle.
+func (c Config) VLANSegmentNames() []string {
+	var names []string
+	for _, s := range c.Segments {
+		if s.Type == "wifi" {
+			continue
+		}
+		names = append(names, s.Name)
 	}
 	return names
 }
@@ -322,8 +389,26 @@ func Load(path string, envVars map[string]string) (Config, error) {
 			natives++
 		case "vlan":
 			// fine
+		case "wifi":
+			// ifname/mac/pciVendor+pciDevice are all optional -- see
+			// Segment.IfName's doc comment for the priority order and
+			// what leaving all four unset ("auto") means
+			// (internal/ifdiscover.Find). The one thing actually invalid
+			// here is a PARTIAL pciVendor/pciDevice pair -- that's not
+			// "fall back to auto", it's almost certainly a typo/omission
+			// worth failing on now rather than silently auto-discovering
+			// the wrong (or a different) radio.
+			if (s.PCIVendor == "") != (s.PCIDevice == "") {
+				return c, fmt.Errorf("config: %s: segment %q: pciVendor and pciDevice must both be set, or neither (got pciVendor=%q pciDevice=%q)", path, s.Name, s.PCIVendor, s.PCIDevice)
+			}
+			if s.SSID == "" {
+				return c, fmt.Errorf("config: %s: segment %q: type \"wifi\" requires ssid", path, s.Name)
+			}
+			if s.PSK == "" {
+				return c, fmt.Errorf("config: %s: segment %q: type \"wifi\" requires psk", path, s.Name)
+			}
 		default:
-			return c, fmt.Errorf("config: %s: segment %q has invalid type %q (must be \"native\" or \"vlan\")", path, s.Name, s.Type)
+			return c, fmt.Errorf("config: %s: segment %q has invalid type %q (must be \"native\", \"vlan\", or \"wifi\")", path, s.Name, s.Type)
 		}
 		if err := validateDNSCheck(path, s.Name, s.DNSCheck); err != nil {
 			return c, err

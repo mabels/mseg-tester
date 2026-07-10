@@ -1,7 +1,9 @@
 package checks
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,5 +243,72 @@ func TestSelfFQDNNormalizesTrailingDot(t *testing.T) {
 		if got := selfFQDN(c.domain); got != want {
 			t.Errorf("%s: selfFQDN(%q) = %q, want %q", c.name, c.domain, got, want)
 		}
+	}
+}
+
+// fakeResolveIfName swaps resolveIfNameFn for the duration of the
+// calling test and restores it afterward -- same seam pattern as
+// fakeRunOnce, lets discoverIface's wifi-resolution branch be tested
+// without touching the real filesystem.
+func fakeResolveIfName(t *testing.T, fn func(ifname, mac, pciVendor, pciDevice string) (string, error)) {
+	t.Helper()
+	orig := resolveIfNameFn
+	resolveIfNameFn = fn
+	t.Cleanup(func() { resolveIfNameFn = orig })
+}
+
+func TestDiscoverIfaceResolvesWifiSegmentViaSeam(t *testing.T) {
+	var gotArgs [4]string
+	fakeResolveIfName(t, func(ifname, mac, pciVendor, pciDevice string) (string, error) {
+		gotArgs = [4]string{ifname, mac, pciVendor, pciDevice}
+		return "wlan0", nil
+	})
+	// ifaces.List() itself still runs for real below (not seamed --
+	// matches its pre-existing, environment-dependent lack of coverage),
+	// so this only asserts discoverIface reaches that point at all
+	// (meaning resolution succeeded and wasn't short-circuited) and that
+	// it forwarded seg's fields correctly, not the final Iface result.
+	seg := config.Segment{
+		Name: "wifi-128", Type: "wifi",
+		MAC: "90:7a:be:dc:34:a9", PCIVendor: "14c3", PCIDevice: "0616",
+	}
+	_, err := discoverIface(seg)
+	if gotArgs != [4]string{"", "90:7a:be:dc:34:a9", "14c3", "0616"} {
+		t.Errorf("resolveIfNameFn called with %v, want seg's ifname/mac/pciVendor/pciDevice forwarded", gotArgs)
+	}
+	// Whatever err comes back is from the real ifaces.List()/Find() below
+	// resolution, not from resolution itself (which the fake always
+	// succeeds) -- just confirm it's not the "resolving wifi interface"
+	// wrapper this function adds on a resolution failure.
+	if err != nil && strings.Contains(err.Error(), "resolving wifi interface") {
+		t.Errorf("discoverIface returned a resolution error despite the fake succeeding: %v", err)
+	}
+}
+
+func TestDiscoverIfaceReturnsResolutionErrorForWifiSegment(t *testing.T) {
+	fakeResolveIfName(t, func(ifname, mac, pciVendor, pciDevice string) (string, error) {
+		return "", fmt.Errorf("no Wi-Fi-capable interface found")
+	})
+	_, err := discoverIface(config.Segment{Name: "wifi-128", Type: "wifi"})
+	if err == nil {
+		t.Fatal("expected discoverIface to propagate the resolution failure")
+	}
+	if !strings.Contains(err.Error(), "resolving wifi interface") {
+		t.Errorf("error = %q, want it wrapped as a wifi-resolution failure", err.Error())
+	}
+}
+
+func TestDiscoverIfaceNeverResolvesForNonWifiSegments(t *testing.T) {
+	called := false
+	fakeResolveIfName(t, func(ifname, mac, pciVendor, pciDevice string) (string, error) {
+		called = true
+		return "should-not-be-used", nil
+	})
+	// Type "native"/"vlan" -- resolveIfNameFn must never be invoked for
+	// these; ifaces.Find's own existing ifname-override/counting logic
+	// still applies unchanged.
+	_, _ = discoverIface(config.Segment{Name: "128", Type: "native"})
+	if called {
+		t.Error("resolveIfNameFn was called for a non-wifi segment")
 	}
 }

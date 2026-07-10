@@ -6,6 +6,16 @@
 //	                        internal/netplan.Write would install for one
 //	                        segment, from a local config.yaml, no VM or
 //	                        network access needed at all. See renderNetplanCmd.
+//	mseg-tester find-iface -- console debug helper: resolves a "wifi"
+//	                        segment's interface name (by -mac,
+//	                        -pci-vendor/-pci-device, or "auto" if none
+//	                        given) against THIS machine's real hardware
+//	                        and prints it -- the same resolution
+//	                        internal/checks/discoverIface and run's own
+//	                        netplan-write step perform, standalone, so it
+//	                        can be sanity-checked over SSH/console during
+//	                        setup without waiting for a full run. See
+//	                        findIfaceCmd.
 //	mseg-tester deploy   -- one-time (and idempotent-to-repeat) install:
 //	                        copy this executable to /usr/local/bin, write
 //	                        and enable the systemd unit. See internal/deploy.
@@ -79,6 +89,7 @@ import (
 	"github.com/mabels/mseg-tester/internal/configsync"
 	"github.com/mabels/mseg-tester/internal/deploy"
 	"github.com/mabels/mseg-tester/internal/envfile"
+	"github.com/mabels/mseg-tester/internal/ifdiscover"
 	"github.com/mabels/mseg-tester/internal/netplan"
 	"github.com/mabels/mseg-tester/internal/report"
 	"github.com/mabels/mseg-tester/internal/selfupdate"
@@ -87,7 +98,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("mseg-tester: expected a subcommand: \"deploy\", \"run\", or \"render-netplan\"")
+		log.Fatalf("mseg-tester: expected a subcommand: \"deploy\", \"run\", \"render-netplan\", or \"find-iface\"")
 	}
 	subcommand := os.Args[1]
 	args := os.Args[2:]
@@ -101,8 +112,10 @@ func main() {
 		runCmd(args)
 	case "render-netplan":
 		renderNetplanCmd(args)
+	case "find-iface":
+		findIfaceCmd(args)
 	default:
-		log.Fatalf("mseg-tester: unknown subcommand %q -- expected \"deploy\", \"run\", or \"render-netplan\"", subcommand)
+		log.Fatalf("mseg-tester: unknown subcommand %q -- expected \"deploy\", \"run\", \"render-netplan\", or \"find-iface\"", subcommand)
 	}
 }
 
@@ -130,6 +143,34 @@ func renderNetplanCmd(args []string) {
 		log.Fatalf("mseg-tester: segment %q not declared in %s", *segmentName, *configFile)
 	}
 	fmt.Print(netplan.Render(*trunkIface, seg))
+}
+
+// findIfaceCmd resolves -mac/-pci-vendor+-pci-device (or, with none of
+// those given, "auto") against THIS machine's real /sys/class/net and
+// /sys/bus/pci/devices via internal/ifdiscover, and prints the result --
+// the exact same resolution config.Segment.IfName's doc comment
+// describes for a "wifi" segment, standalone, so it can be checked by
+// hand over SSH/console (e.g. right after wiring up PCI passthrough,
+// before ever writing it into config.yaml) instead of only discovering
+// a mistake once `run` fails.
+func findIfaceCmd(args []string) {
+	fs := flag.NewFlagSet("find-iface", flag.ExitOnError)
+	mac := fs.String("mac", "", "match by hardware address, e.g. \"90:7a:be:dc:34:a9\"")
+	pciVendor := fs.String("pci-vendor", "", "match by PCI vendor ID, hex, e.g. \"14c3\" -- requires -pci-device too")
+	pciDevice := fs.String("pci-device", "", "match by PCI device ID, hex, e.g. \"0616\" -- requires -pci-vendor too")
+	_ = fs.Parse(args)
+
+	if (*pciVendor == "") != (*pciDevice == "") {
+		log.Fatalf("mseg-tester: find-iface: -pci-vendor and -pci-device must both be set, or neither")
+	}
+
+	iface, err := ifdiscover.Find("/sys/class/net", "/sys/bus/pci/devices", ifdiscover.Criteria{
+		MAC: *mac, PCIVendor: *pciVendor, PCIDevice: *pciDevice,
+	})
+	if err != nil {
+		log.Fatalf("mseg-tester: find-iface: %v", err)
+	}
+	fmt.Println(iface)
 }
 
 func runCmd(args []string) {
@@ -285,6 +326,22 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	if !ok {
 		return fmt.Errorf("next segment %q not declared in %s", next, boot.ConfigLocalPath)
 	}
+	// A "wifi" segment's IfName may be empty (see config.Segment.IfName's
+	// doc comment -- "auto", or identified by MAC/PCI instead of a
+	// literal name): resolve it to a concrete interface name NOW, once,
+	// so both netplan.Write below and internal/checks' own discoverIface
+	// (next boot, once this segment becomes active) see a plain literal
+	// name either way -- resolveIfName is a no-op for "native"/"vlan"
+	// segments and for any "wifi" segment that already has IfName set.
+	// Unlike checks' resolution (which reuses its own per-attempt retry
+	// loop), a failure here is NOT retried -- this runs once, right
+	// before writing netplan, and a passthrough card's driver binding at
+	// kernel boot (well before this service starts) is expected to have
+	// already happened by now.
+	nextSeg, err = resolveIfName(nextSeg)
+	if err != nil {
+		return fmt.Errorf("resolving interface for next segment %s: %w", next, err)
+	}
 	if verbose {
 		log.Printf("run: writing netplan for next segment %s", next)
 	}
@@ -332,6 +389,25 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	// from a genuinely cold boot, which is this whole tool's point.
 	// Always reboot, updated or not.
 	return exec.Command("systemctl", "reboot").Run()
+}
+
+// resolveIfName returns seg unchanged unless it's a "wifi" segment with
+// no IfName set, in which case it resolves one via internal/ifdiscover
+// (against seg's MAC/PCIVendor/PCIDevice, or "auto" if none of those are
+// set either -- see config.Segment.IfName's doc comment) and returns a
+// copy with IfName filled in. Both netplan.Write (this segment's next
+// boot) and internal/checks.discoverIface (once this segment becomes
+// active) end up working from that same resolved name.
+func resolveIfName(seg config.Segment) (config.Segment, error) {
+	if seg.Type != "wifi" || seg.IfName != "" {
+		return seg, nil
+	}
+	resolved, err := ifdiscover.ResolveIfName(seg.IfName, seg.MAC, seg.PCIVendor, seg.PCIDevice)
+	if err != nil {
+		return seg, err
+	}
+	seg.IfName = resolved
+	return seg, nil
 }
 
 // applyTimezone runs `timedatectl set-timezone tz` if tz is set -- a

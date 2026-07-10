@@ -19,8 +19,10 @@
 hostname: mseg-tester
 
 package_update: true
+package_upgrade: true    # dist-upgrade everything already installed on first boot, not just refresh the apt index
 packages:
   - ca-certificates
+  - wpasupplicant         # required for netplan's wifis: stanza -- see the segment "wifi-*" entries in config.yaml below
 
 write_files:
   # Initial netplan: segment 129 only, same shape mseg-tester itself
@@ -127,6 +129,29 @@ write_files:
                 domain: "mam-hh.adviser.com."           # this segment's dynamic-DNS zone; see internal/checks' package doc
           routingCheck: "1.1.1.1:443"
           routingCheck6: "[2606:4700:4700::1111]:443"
+        - name: "wifi-128"
+          type: wifi   # dedicated Wi-Fi radio (passthrough), not a VLAN -- no trunk-derived default, unlike native/vlan (see README's interface-discovery note)
+          pciVendor: "14c3"   # MediaTek MT7922
+          pciDevice: "0616"
+          ssid: "${WIFI_128_SSID}"
+          psk: "${WIFI_128_PSK}"   # expanded from /etc/mseg-tester/.env at runtime -- see the EnvFile write_files entry further down
+          dnsCheck:
+            servers: ["system", "192.168.128.5", "fd00:192:168:128::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.mam-hh.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.mam-hh.adviser.com."
+              - type: AAAA-PTR
+                host: "mam-hh-gw.mam-hh.adviser.com."
+              - type: Hostname4
+                domain: "mam-hh.adviser.com."
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "129"
           type: vlan
           dnsCheck:
@@ -148,6 +173,32 @@ write_files:
           routingCheck6: "[2606:4700:4700::1111]:443"
         - name: "130"
           type: vlan
+          dnsCheck:
+            servers: ["system", "192.168.130.5", "fd00:192:168:130::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.for-130.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.for-130.adviser.com."
+              - type: AAAA-PTR
+                host: "mam-hh-gw.for-130.adviser.com."
+              - type: Hostname4
+                domain: "for-130.adviser.com."
+          geoCheck:
+            url: "https://ifconfig.co/country"
+            expect: "Germany"                      # mullvad-de exit
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
+        - name: "wifi-130"
+          type: wifi
+          pciVendor: "14c3"   # MediaTek MT7922 -- see README's interface-discovery note
+          pciDevice: "0616"
+          ssid: "${WIFI_130_SSID}"
+          psk: "${WIFI_130_PSK}"
           dnsCheck:
             servers: ["system", "192.168.130.5", "fd00:192:168:130::5"]
             tests:
@@ -190,6 +241,57 @@ write_files:
             expect: "United States"                # mullvad-us exit
           routingCheck: "1.1.1.1:443"
           routingCheck6: "[2606:4700:4700::1111]:443"
+        - name: "wifi-131"
+          type: wifi
+          pciVendor: "14c3"   # MediaTek MT7922 -- see README's interface-discovery note
+          pciDevice: "0616"
+          ssid: "${WIFI_131_SSID}"
+          psk: "${WIFI_131_PSK}"
+          dnsCheck:
+            servers: ["system", "192.168.131.5", "fd00:192:168:131::5"]
+            tests:
+              - type: A
+                host: "mam-hh-gw.mullvad-us.adviser.com."
+              - type: A
+                host: "google.com."
+              - type: A
+                host: "amazon.com."
+              - type: A-PTR
+                host: "mam-hh-gw.mullvad-us.adviser.com."
+              - type: AAAA-PTR
+                host: "mam-hh-gw.mullvad-us.adviser.com."
+              - type: Hostname4
+                domain: "mullvad-us.adviser.com."
+          geoCheck:
+            url: "https://ifconfig.co/country"
+            expect: "United States"                # mullvad-us exit
+          routingCheck: "1.1.1.1:443"
+          routingCheck6: "[2606:4700:4700::1111]:443"
+
+  # Local-only secrets referenced above as "${VAR}" -- expanded at
+  # config.yaml LOAD time (internal/envfile), not by cloud-init itself, so
+  # this file's own "${WIFI_128_SSID}" etc. above stay literal text right
+  # up until mseg-tester actually reads config.yaml. Matches
+  # bootstrap.Bootstrap.EnvFile's default path (/etc/mseg-tester/.env) and
+  # the same mechanism cmd/verify-mseg-tester's own -env-file uses (see
+  # internal/verifyvm/user-data.yaml.tmpl) -- this file is the one place
+  # that path has to be provisioned by hand instead, since there's no
+  # separate create-time step here to do it for you.
+  #
+  # REPLACE every value below with the real SSID/password before
+  # provisioning (same "hand-edit, then re-provision" workflow as
+  # TRUNK_IFACE above) -- these placeholders will NOT resolve on their
+  # own. 0600, never synced anywhere, same trust level as
+  # bootstrap.yaml's configToken.
+  - path: /etc/mseg-tester/.env
+    permissions: "0600"
+    content: |
+      WIFI_128_SSID=REPLACE_ME
+      WIFI_128_PSK=REPLACE_ME
+      WIFI_130_SSID=REPLACE_ME
+      WIFI_130_PSK=REPLACE_ME
+      WIFI_131_SSID=REPLACE_ME
+      WIFI_131_PSK=REPLACE_ME
 
   # The actual build-and-install logic runs as a real shell script (not
   # inline `runcmd` entries) purely so it can retry in a loop -- cloud-init
