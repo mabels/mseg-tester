@@ -225,19 +225,33 @@ network:
 # time (observed: "no limit" on systemd-networkd-wait-online.service)
 # waiting on an interface that was never going to get an address.
 #
+# accept-ra/link-local are EXPLICITLY off here, not just left unset --
+# confirmed live as a real bug otherwise: this trunk NIC physically
+# carries every segment's VLAN, including whichever one (if any) is this
+# trunk's NATIVE/untagged VLAN (config.Segment.Type "native") -- that
+# segment's real, unsolicited router advertisements still arrive
+# untagged on this same link no matter which TAGGED segment mseg-tester
+# currently considers active, and without an explicit accept-ra: false
+# here the kernel autoconfigured a real global SLAAC address on the bare
+# trunk from them regardless -- an address on an interface this tool
+# considers "just an address-less VLAN carrier" and never intended to be
+# reachable at all while a different segment is under test.
+#
 # dhcp6 stays false -- this network uses SLAAC (router advertisements),
-# not DHCPv6. accept-ra/link-local are set explicitly rather than left to
-# netplan's defaults: OVN on this network can only ever deliver a
-# SOLICITED router advertisement (its own periodic RA is unconditionally
-# dropped -- see internal/checks' package doc), so a client MUST have a
-# link-local address to source its router solicitation from, or SLAAC
-# never completes at all. link-local: [] has broken this before.
+# not DHCPv6. The VLAN sub-interface below (this segment's own) is the
+# one exception that WANTS accept-ra/link-local on: OVN on this network
+# can only ever deliver a SOLICITED router advertisement (its own
+# periodic RA is unconditionally dropped -- see internal/checks' package
+# doc), so a client MUST have a link-local address to source its router
+# solicitation from, or SLAAC never completes at all.
 network:
   version: 2
   ethernets:
     %s:
       dhcp4: false
       dhcp6: false
+      accept-ra: false
+      link-local: []
       optional: true
   vlans:
     %s:

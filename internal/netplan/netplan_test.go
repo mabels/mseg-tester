@@ -85,6 +85,44 @@ func TestRenderVLANSegment(t *testing.T) {
 	assertValidNetplanYAML(t, out)
 }
 
+func TestRenderVLANSegmentBareTrunkDoesNotAutoconfigureFromNativeSegmentRA(t *testing.T) {
+	// Regression, confirmed live: this trunk NIC physically carries
+	// every VLAN, including whatever segment (if any) is this trunk's
+	// native/untagged one -- that segment's real router advertisements
+	// still arrive untagged on the bare trunk no matter which TAGGED
+	// segment mseg-tester currently considers active. Without an
+	// explicit accept-ra: false (and link-local: []) on the bare trunk
+	// itself, the kernel autoconfigured a real global SLAAC address on
+	// it from those RAs regardless -- parse this out structurally (not
+	// just substring-search) since both "true" and "false" appear
+	// legitimately elsewhere in the same document (the VLAN
+	// sub-interface's own accept-ra: true).
+	seg := config.Segment{Name: "129", Type: "vlan"}
+	out := Render("ens18", seg, nil)
+
+	var parsed struct {
+		Network struct {
+			Ethernets map[string]struct {
+				AcceptRA  *bool    `yaml:"accept-ra"`
+				LinkLocal []string `yaml:"link-local"`
+			} `yaml:"ethernets"`
+		} `yaml:"network"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("Unmarshal: %v\n%s", err, out)
+	}
+	trunk, ok := parsed.Network.Ethernets["ens18"]
+	if !ok {
+		t.Fatalf("expected an ethernets.ens18 entry, got:\n%s", out)
+	}
+	if trunk.AcceptRA == nil || *trunk.AcceptRA {
+		t.Errorf("expected the bare trunk's accept-ra explicitly false, got %v, out:\n%s", trunk.AcceptRA, out)
+	}
+	if len(trunk.LinkLocal) != 0 {
+		t.Errorf("expected the bare trunk's link-local explicitly empty, got %v, out:\n%s", trunk.LinkLocal, out)
+	}
+}
+
 func TestRenderIfNameOverride(t *testing.T) {
 	seg := config.Segment{Name: "130", Type: "vlan", IfName: "customvlan0"}
 	out := Render("ens18", seg, nil)
