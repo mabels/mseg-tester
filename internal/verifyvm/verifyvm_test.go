@@ -351,6 +351,42 @@ func createStepCommand(t *testing.T, steps []Step) string {
 	return ""
 }
 
+func TestBuildCreatePlanDefaultsToStdVGA(t *testing.T) {
+	cmd := createStepCommand(t, mustBuildCreatePlan(t, minimalCreateParams()))
+	if !strings.Contains(cmd, "--vga std") {
+		t.Errorf("expected --vga std by default (VGA unset), got: %s", cmd)
+	}
+	if !strings.Contains(cmd, "--serial0 socket") {
+		t.Errorf("expected --serial0 socket regardless of VGA, got: %s", cmd)
+	}
+}
+
+func TestBuildCreatePlanHonorsVGAOverride(t *testing.T) {
+	p := minimalCreateParams()
+	p.VGA = "serial0"
+	cmd := createStepCommand(t, mustBuildCreatePlan(t, p))
+	if !strings.Contains(cmd, "--vga serial0") {
+		t.Errorf("expected --vga serial0 when Params.VGA is set to \"serial0\", got: %s", cmd)
+	}
+	// --serial0 socket must stay present even when VGA is overridden --
+	// that's what keeps `qm terminal` working regardless of which vga
+	// type is primary, instead of only ever being an either/or choice.
+	if !strings.Contains(cmd, "--serial0 socket") {
+		t.Errorf("expected --serial0 socket to remain present regardless of VGA, got: %s", cmd)
+	}
+}
+
+// mustBuildCreatePlan is a small helper so the two VGA tests above don't
+// each repeat the same err-handling boilerplate.
+func mustBuildCreatePlan(t *testing.T, p Params) []Step {
+	t.Helper()
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	return steps
+}
+
 func TestBuildCreatePlanAddsQ35WhenHostPCIDevicesSet(t *testing.T) {
 	// Regression: `qm start` failed live with "q35 machine model is not
 	// enabled" -- hostpciN's "pcie=1" flag (see attachHostPCI) requires

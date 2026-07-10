@@ -73,6 +73,16 @@ type Params struct {
 	Start           bool
 	SnippetsStorage string
 	SnippetsPath    string // filesystem path to that storage's snippets dir, ON the Proxmox host
+	// VGA is passed straight through as `qm create`'s --vga value --
+	// defaults to "std", a normal graphical console viewable in
+	// Proxmox's own noVNC "Console" tab. Set to "serial0" instead for
+	// the historical behavior (boot output and login both go through the
+	// serial console), or any other value `qm`/QEMU accepts (cirrus,
+	// qxl, virtio, ...) -- --serial0 socket is added unconditionally
+	// either way, so `qm terminal` keeps working no matter what VGA is
+	// set to; this only changes which one QEMU treats as the PRIMARY
+	// display during boot (GRUB, kernel messages, getty).
+	VGA string
 
 	// create-only: rendered into the cloud-init user-data (see
 	// internal/bootstrap for what each of these means on the guest side).
@@ -257,6 +267,16 @@ func (p Params) net0() string {
 	return fmt.Sprintf("virtio,bridge=%s,trunks=%s", p.Bridge, strings.Join(p.TrunkVLANs, ";"))
 }
 
+// vga returns p.VGA, defaulting to "std" (a normal graphical console)
+// when unset -- covers Params built directly (e.g. in tests) without
+// going through cmd/verify-mseg-tester's flag default.
+func (p Params) vga() string {
+	if p.VGA == "" {
+		return "std"
+	}
+	return p.VGA
+}
+
 // ValidateCommon checks the flags every subcommand needs.
 func (p Params) ValidateCommon() error {
 	var missing []string
@@ -410,7 +430,7 @@ func (p Params) BuildCreatePlan() ([]Step, error) {
 		"--net0", shQuote(p.net0()),
 		"--onboot", boolToInt(p.Onboot),
 		"--serial0", "socket",
-		"--vga", "serial0",
+		"--vga", p.vga(),
 		"--citype", "nocloud",
 		"--ciuser", "ubuntu",
 		"--cicustom", shQuote(fmt.Sprintf("user=%s:snippets/%s,network=%s:snippets/%s",

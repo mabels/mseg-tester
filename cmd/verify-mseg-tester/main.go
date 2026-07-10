@@ -84,6 +84,7 @@ func runCreate(args []string) {
 	fs.IntVar(&p.MemoryMB, "memory", 1024, "memory in MB")
 	fs.StringVar(&p.DiskSize, "disk-size", "8G", "disk size after import, passed to `qm resize`")
 	fs.StringVar(&p.BIOS, "bios", "seabios", `"seabios" or "ovmf"`)
+	fs.StringVar(&p.VGA, "vga", "std", `qm's --vga value -- "std" (default) is a normal graphical console, viewable in Proxmox's own noVNC "Console" tab. Pass "serial0" instead to put boot output/login on the serial console only (or any other qm/QEMU vga type: cirrus, qxl, virtio, ...). --serial0 socket is always added regardless, so "qm terminal" keeps working either way -- this only picks which one is the PRIMARY display during boot`)
 	fs.BoolVar(&p.Onboot, "onboot", false, "start this VM automatically when the Proxmox host itself boots")
 	fs.BoolVar(&p.Start, "start", true, "start the VM once created")
 	fs.StringVar(&p.SnippetsStorage, "snippets-storage", "local", "storage ID that holds cloud-init snippets")

@@ -413,6 +413,14 @@ Notes:
   otherwise-successful `create`). `-bios seabios` (the default) plus q35
   is a normal combination and needs no `--efidisk0`; only `-bios ovmf`
   adds that.
+- `-vga` defaults to `"std"` — a normal graphical console, viewable in
+  Proxmox's regular noVNC "Console" tab. Pass `-vga serial0` instead to
+  put boot output/login on the serial console only (`qm terminal`, or
+  Proxmox's noVNC "Serial Console" tab) — or any other `qm`/QEMU vga
+  type: `cirrus`, `qxl`, `virtio`, ... `--serial0 socket` is added
+  unconditionally either way, so `qm terminal` keeps working regardless
+  of which one is picked; `-vga` only chooses which is the PRIMARY
+  display during boot (GRUB, kernel messages, getty).
 - If any segment is `type: native`, `net0` is generated with **no**
   `tag=`/`trunks=` at all, not `tag=<native>,trunks=<rest>` — on an OVS
   bridge, giving the untagged segment an explicit `tag=` routes it
