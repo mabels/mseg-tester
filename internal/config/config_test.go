@@ -289,3 +289,101 @@ func TestCycleNamesIncludesWifi(t *testing.T) {
 		t.Errorf("CycleNames = %v, want %v", got, want)
 	}
 }
+
+func TestWifiPCIDevicesDedupsSharedRadio(t *testing.T) {
+	// Mirrors this project's own examples/config.yaml: wifi-128/130/131
+	// all identify the SAME physical card -- should collapse to one
+	// entry, not three.
+	path := writeTemp(t, minimalYAML+`
+  - name: "wifi-128"
+    type: wifi
+    pciVendor: "14c3"
+    pciDevice: "0616"
+    ssid: "MAM-HH"
+    psk: "secret"
+    routingCheck: "1.1.1.1:443"
+  - name: "wifi-130"
+    type: wifi
+    pciVendor: "14c3"
+    pciDevice: "0616"
+    ssid: "FOR_130"
+    psk: "secret"
+    routingCheck: "1.1.1.1:443"
+`)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.WifiPCIDevices()
+	want := []string{"14c3:0616"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("WifiPCIDevices = %v, want %v", got, want)
+	}
+}
+
+func TestWifiPCIDevicesMultipleDistinctDevicesInOrder(t *testing.T) {
+	path := writeTemp(t, minimalYAML+`
+  - name: "wifi-130"
+    type: wifi
+    pciVendor: "14c3"
+    pciDevice: "0616"
+    ssid: "FOR_130"
+    psk: "secret"
+    routingCheck: "1.1.1.1:443"
+  - name: "wifi-131"
+    type: wifi
+    pciVendor: "8086"
+    pciDevice: "2725"
+    ssid: "MAM-HH-US"
+    psk: "secret"
+    routingCheck: "1.1.1.1:443"
+`)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.WifiPCIDevices()
+	want := []string{"14c3:0616", "8086:2725"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("WifiPCIDevices = %v, want %v", got, want)
+	}
+}
+
+func TestWifiPCIDevicesSkipsSegmentsIdentifiedByIfnameOrMAC(t *testing.T) {
+	path := writeTemp(t, minimalYAML+`
+  - name: "wifi-128"
+    type: wifi
+    ifname: wlan0
+    ssid: "MAM-HH"
+    psk: "secret"
+    routingCheck: "1.1.1.1:443"
+  - name: "wifi-130"
+    type: wifi
+    mac: "90:7a:be:dc:34:a9"
+    ssid: "FOR_130"
+    psk: "secret"
+    routingCheck: "1.1.1.1:443"
+`)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.WifiPCIDevices(); len(got) != 0 {
+		t.Errorf("WifiPCIDevices = %v, want empty (neither segment declares pciVendor/pciDevice)", got)
+	}
+}
+
+func TestWifiPCIDevicesEmptyForNonWifiSegments(t *testing.T) {
+	path := writeTemp(t, minimalYAML+`
+  - name: "129"
+    type: vlan
+    routingCheck: "1.1.1.1:443"
+`)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.WifiPCIDevices(); len(got) != 0 {
+		t.Errorf("WifiPCIDevices = %v, want empty", got)
+	}
+}

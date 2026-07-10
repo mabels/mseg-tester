@@ -92,7 +92,7 @@ func runCreate(args []string) {
 	fs.StringVar(&p.TrunkIface, "trunk-iface", "ens18", "NIC name inside the guest")
 	fs.StringVar(&p.UpdateSegment, "update-segment", "", "the one VLAN/segment with internet access (required)")
 	fs.StringVar(&p.SoftwareRepo, "software-repo", "", "owner/repo (on github.com) `go install` builds mseg-tester from -- no release needed (required)")
-	configFile := fs.String("config-file", "", "path to a plain local config.yaml to deploy as-is -- no private repo or token needed (the easy path; see examples/config.yaml). Also read to derive the trunk's VLAN list and native segment (config.Segment.Type/IfName -- see internal/config), so -trunk-vlans/-native-segment no longer exist as separate flags. Required unless -config-repo is set")
+	configFile := fs.String("config-file", "", "path to a plain local config.yaml to deploy as-is -- no private repo or token needed (the easy path; see examples/config.yaml). Also read to derive the trunk's VLAN list, native segment (config.Segment.Type/IfName -- see internal/config), and which PCI device(s) to passthrough for any \"wifi\" segment (config.Segment.PCIVendor/PCIDevice), so -trunk-vlans/-native-segment/-hostpci no longer exist as separate flags. Required unless -config-repo is set")
 	fs.StringVar(&p.ConfigRepo, "config-repo", "", "URL of a private (or public) repo to fetch/refresh config.yaml from at runtime instead, e.g. https://github.com/owner/repo. Required unless -config-file is set")
 	fs.StringVar(&p.ConfigPath, "config-path", "config.yaml", "path of config.yaml within config-repo")
 	fs.StringVar(&p.ConfigRef, "config-ref", "main", "branch/tag/commit to fetch config.yaml at")
@@ -185,6 +185,12 @@ func runCreate(args []string) {
 		if native, ok := parsedCfg.NativeSegmentName(); ok {
 			p.NativeSegment = native
 		}
+		// Likewise, derive which PCI device(s) to passthrough from the
+		// same config.yaml's wifi segments (pciVendor/pciDevice) rather
+		// than a separate -hostpci flag -- one source of truth for "which
+		// physical radio", the operator never types a PCI address by
+		// hand. See verifyvm.Params.HostPCIDevices' doc comment.
+		p.HostPCIDevices = parsedCfg.WifiPCIDevices()
 	}
 	if *sshKeyFile != "" {
 		b, err := os.ReadFile(*sshKeyFile)

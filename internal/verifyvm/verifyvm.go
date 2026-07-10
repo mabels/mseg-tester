@@ -135,6 +135,24 @@ type Params struct {
 	// does NOT enable SSH password auth (ssh_pwauth is left unset): SSH
 	// still requires the key either way.
 	ConsolePassword string
+	// HostPCIDevices is OPTIONAL -- PCI "vendor:device" hex ID pairs
+	// (e.g. "14c3:0616") to passthrough to the VM as hostpci0, hostpci1,
+	// ... in the given order. Populated automatically by
+	// cmd/verify-mseg-tester from -config-file's "wifi" segments
+	// (config.Config.WifiPCIDevices), NOT a direct CLI flag -- config.yaml
+	// already declares which PCI device a wifi segment identifies its
+	// radio by INSIDE the guest (segments[].pciVendor/pciDevice), so
+	// reusing that as this VM's own passthrough list means the operator
+	// never has to separately look up and type a PCI *address* by hand.
+	// The vendor:device ID pair is stable hardware identity (the same on
+	// host and guest, per lspci -nn); only the PCI bus ADDRESS that
+	// device happens to live at is host-specific, and can't be known
+	// without actually querying the host -- so unlike every other field
+	// here, this can't be resolved during a dry run (see
+	// BuildCreatePlan's hostpci steps, which query it live via `lspci -n
+	// -d` over ssh at apply time and are described but not run when
+	// -yes isn't given).
+	HostPCIDevices []string
 
 	// destroy-only.
 	KeepSnippets bool
@@ -432,6 +450,16 @@ func (p Params) BuildCreatePlan() ([]Step, error) {
 		},
 	)
 
+	for i, dev := range p.HostPCIDevices {
+		i, dev := i, dev // capture per-iteration
+		steps = append(steps, Step{
+			Description: fmt.Sprintf("find PCI device %s on %s and attach as hostpci%d", dev, p.Host, i),
+			Action: func(r Runner) error {
+				return p.attachHostPCI(r, i, dev)
+			},
+		})
+	}
+
 	if p.Start {
 		steps = append(steps, Step{
 			Description: fmt.Sprintf("start VM %d", p.VMID),
@@ -440,6 +468,45 @@ func (p Params) BuildCreatePlan() ([]Step, error) {
 	}
 
 	return steps, nil
+}
+
+// attachHostPCI resolves vendorDevice (a "vendor:device" hex ID pair, e.g.
+// "14c3:0616") to its live PCI bus address on the Proxmox host via
+// `lspci -n -d vendor:device` (the same identity `internal/ifdiscover`
+// resolves to an interface NAME on the guest side, mirrored here to a PCI
+// ADDRESS on the host side -- the two can't share code since one reads
+// sysfs locally and the other queries a remote host over ssh, but the
+// underlying idea, "identify hardware by stable vendor:device ID instead
+// of a fragile positional name/address," is the same one), then attaches
+// it as hostpci<index>,pcie=1 via `qm set`.
+//
+// If more than one device on the host matches vendorDevice, the first one
+// `lspci` lists is used -- fine for this project's own setup (one radio),
+// but worth knowing if you ever passthrough two identical cards: this
+// would resolve both HostPCIDevices entries to the SAME address at
+// present writing.
+func (p Params) attachHostPCI(r Runner, index int, vendorDevice string) error {
+	out, err := r.Run(fmt.Sprintf("lspci -n -d %s", shQuote(vendorDevice)), nil)
+	if err != nil {
+		return fmt.Errorf("looking up PCI device %s on %s: %w", vendorDevice, p.Host, err)
+	}
+	line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(out), "\n", 2)[0])
+	if line == "" {
+		return fmt.Errorf("no PCI device matching %s found on %s (`lspci -n -d %s` returned nothing -- is it passed through/visible to the host yet?)", vendorDevice, p.Host, vendorDevice)
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return fmt.Errorf("unexpected `lspci -n -d %s` output on %s: %q", vendorDevice, p.Host, out)
+	}
+	addr := fields[0] // e.g. "07:00.0" -- lspci's short form, no domain
+	if strings.Count(addr, ":") < 2 {
+		addr = "0000:" + addr // qm/qemu want the full "0000:07:00.0" form
+	}
+	cmd := fmt.Sprintf("qm set %d --hostpci%d %s", p.VMID, index, shQuote(addr+",pcie=1"))
+	if _, err := r.Run(cmd, nil); err != nil {
+		return fmt.Errorf("attaching hostpci%d (%s at %s) to VM %d: %w", index, vendorDevice, addr, p.VMID, err)
+	}
+	return nil
 }
 
 // ensureSnippetsEnabled queries the storage's current `content` types and

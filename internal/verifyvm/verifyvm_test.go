@@ -1,6 +1,7 @@
 package verifyvm
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -233,6 +234,132 @@ func TestValidateCreateNativeSegmentMustBeInTrunkVLANs(t *testing.T) {
 	}
 	if err := p.ValidateCreate(); err == nil {
 		t.Error("expected an error when -native-segment isn't in -trunk-vlans")
+	}
+}
+
+// fakeRunner is a scripted Runner for testing Step.Action functions
+// without an actual ssh connection -- each Run call is matched against
+// responses in order, and every command actually issued is recorded so
+// tests can assert on it.
+type fakeRunner struct {
+	responses []fakeResponse
+	calls     []string
+	next      int
+}
+
+type fakeResponse struct {
+	out string
+	err error
+}
+
+func (f *fakeRunner) Run(command string, stdin []byte) (string, error) {
+	f.calls = append(f.calls, command)
+	if f.next >= len(f.responses) {
+		return "", fmt.Errorf("fakeRunner: unexpected call #%d: %q (only %d response(s) scripted)", f.next+1, command, len(f.responses))
+	}
+	r := f.responses[f.next]
+	f.next++
+	return r.out, r.err
+}
+
+func minimalCreateParams() Params {
+	return Params{
+		Host: "root@proxmox", VMID: 199, Name: "verify-mseg-tester",
+		Storage: "local-lvm", Image: "/img.qcow2", Bridge: "vmbr0",
+		BIOS: "seabios", Start: false,
+		UpdateSegment: "129", SoftwareRepo: "o/r", ConfigYAML: "segments: []\n",
+		SnippetsStorage: "local", SnippetsPath: "/var/lib/vz/snippets",
+	}
+}
+
+func TestBuildCreatePlanNoHostPCIByDefault(t *testing.T) {
+	steps, err := minimalCreateParams().BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	for _, s := range steps {
+		if strings.Contains(s.Description, "hostpci") {
+			t.Errorf("expected no hostpci step when HostPCIDevices is empty, got step %q", s.Description)
+		}
+	}
+}
+
+func TestBuildCreatePlanOneStepPerHostPCIDevice(t *testing.T) {
+	p := minimalCreateParams()
+	p.HostPCIDevices = []string{"14c3:0616", "8086:2725"}
+	steps, err := p.BuildCreatePlan()
+	if err != nil {
+		t.Fatalf("BuildCreatePlan: %v", err)
+	}
+	var hostpciSteps []Step
+	for _, s := range steps {
+		if strings.Contains(s.Description, "hostpci") {
+			hostpciSteps = append(hostpciSteps, s)
+		}
+	}
+	if len(hostpciSteps) != 2 {
+		t.Fatalf("expected 2 hostpci steps, got %d: %+v", len(hostpciSteps), hostpciSteps)
+	}
+	if !strings.Contains(hostpciSteps[0].Description, "14c3:0616") || !strings.Contains(hostpciSteps[0].Description, "hostpci0") {
+		t.Errorf("expected first step to mention 14c3:0616/hostpci0, got %q", hostpciSteps[0].Description)
+	}
+	if !strings.Contains(hostpciSteps[1].Description, "8086:2725") || !strings.Contains(hostpciSteps[1].Description, "hostpci1") {
+		t.Errorf("expected second step to mention 8086:2725/hostpci1, got %q", hostpciSteps[1].Description)
+	}
+	for _, s := range hostpciSteps {
+		if s.Action == nil {
+			t.Errorf("expected a hostpci step to be an Action (needs a live lookup), not a fixed Command, got %+v", s)
+		}
+	}
+}
+
+func TestAttachHostPCIParsesAddressAndAppliesIt(t *testing.T) {
+	p := Params{Host: "root@proxmox", VMID: 199}
+	r := &fakeRunner{responses: []fakeResponse{
+		{out: "07:00.0 0280: 14c3:0616\n"},
+		{out: ""},
+	}}
+	if err := p.attachHostPCI(r, 0, "14c3:0616"); err != nil {
+		t.Fatalf("attachHostPCI: %v", err)
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("expected 2 remote calls, got %d: %v", len(r.calls), r.calls)
+	}
+	if !strings.Contains(r.calls[0], "lspci -n -d") || !strings.Contains(r.calls[0], "14c3:0616") {
+		t.Errorf("expected an lspci lookup for 14c3:0616, got %q", r.calls[0])
+	}
+	if !strings.Contains(r.calls[1], "qm set 199 --hostpci0") || !strings.Contains(r.calls[1], "0000:07:00.0,pcie=1") {
+		t.Errorf("expected a qm set attaching the resolved+domain-prefixed address, got %q", r.calls[1])
+	}
+}
+
+func TestAttachHostPCIPreservesExplicitDomain(t *testing.T) {
+	p := Params{Host: "root@proxmox", VMID: 199}
+	r := &fakeRunner{responses: []fakeResponse{
+		{out: "0000:07:00.0 0280: 14c3:0616\n"},
+		{out: ""},
+	}}
+	if err := p.attachHostPCI(r, 0, "14c3:0616"); err != nil {
+		t.Fatalf("attachHostPCI: %v", err)
+	}
+	if !strings.Contains(r.calls[1], "0000:07:00.0,pcie=1") {
+		t.Errorf("expected the already-domain-qualified address preserved as-is, got %q", r.calls[1])
+	}
+}
+
+func TestAttachHostPCINoMatchIsAnError(t *testing.T) {
+	p := Params{Host: "root@proxmox", VMID: 199}
+	r := &fakeRunner{responses: []fakeResponse{{out: ""}}}
+	if err := p.attachHostPCI(r, 0, "14c3:0616"); err == nil {
+		t.Error("expected an error when lspci finds no matching device")
+	}
+}
+
+func TestAttachHostPCILookupErrorPropagates(t *testing.T) {
+	p := Params{Host: "root@proxmox", VMID: 199}
+	r := &fakeRunner{responses: []fakeResponse{{err: fmt.Errorf("ssh: connection refused")}}}
+	if err := p.attachHostPCI(r, 0, "14c3:0616"); err == nil {
+		t.Error("expected the ssh error to propagate")
 	}
 }
 

@@ -479,3 +479,37 @@ func (c Config) NativeSegmentName() (string, bool) {
 	}
 	return "", false
 }
+
+// WifiPCIDevices returns the deduplicated set of "vendor:device" PCI ID
+// pairs declared by this config's "wifi" segments' PCIVendor/PCIDevice,
+// in first-seen order -- used by cmd/verify-mseg-tester to derive which
+// PCI devices a disposable VM's `create` should passthrough
+// (Params.HostPCIDevices), so the same config.yaml that identifies a
+// wifi segment's radio INSIDE the guest also drives which physical card
+// gets attached in the first place, rather than needing that PCI ID
+// looked up and typed a second time by hand.
+//
+// Segments identifying their radio by IfName/MAC instead, or by neither
+// (auto-discovery), contribute nothing here: there's no PCI ID to look
+// up a host address for -- IfName/MAC-based discovery (and auto)
+// presume the device is already passed through by the time the guest
+// runs, they don't say which physical device that should be. Dedup
+// matters because this project's own segments (wifi-128/130/131) all
+// currently share ONE physical radio -- each would otherwise ask for the
+// same device to be passed through three times.
+func (c Config) WifiPCIDevices() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range c.Segments {
+		if s.Type != "wifi" || s.PCIVendor == "" || s.PCIDevice == "" {
+			continue
+		}
+		key := s.PCIVendor + ":" + s.PCIDevice
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	return out
+}

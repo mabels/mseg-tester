@@ -159,9 +159,13 @@ VM, one NIC, set as a trunk port carrying VLANs 128/129/130/131. Attach
 **Optional, also one-time, in Proxmox**: for any `type: wifi` segment, PCI
 (or USB) passthrough a dedicated Wi-Fi radio to the VM (`hostpci0:
 0000:xx:xx.x` in the VM's config) — needs IOMMU/VFIO already enabled on
-the host, and the radio isolated in its own IOMMU group. Not automated by
-this tool any more than the trunk port is; check `lspci -nnk` and
-`/sys/kernel/iommu_groups/` on the host first. Once passed through, the
+the host, and the radio isolated in its own IOMMU group; check `lspci
+-nnk` and `/sys/kernel/iommu_groups/` on the host first. Attaching the
+device itself is NOT automated for a hand-built VM the way the rest of
+this section describes (the trunk NIC isn't either — see "Why" above);
+`cmd/verify-mseg-tester create` DOES automate it, though, deriving which
+device(s) to passthrough straight from `-config-file`'s wifi segments'
+`pciVendor`/`pciDevice` — see that section below. Once passed through, the
 guest sees it as a normal wireless NIC — but PCI passthrough gives no
 guarantee the guest names it the same thing on every boot, so pick one of
 three ways to identify it in `config.yaml` rather than hardcoding a name:
@@ -386,6 +390,22 @@ Notes:
   fetched at runtime, not given as a local file), the trunk is left fully
   untagged (every VLAN passes) since there's no local segment list to
   derive from at create-time.
+- Likewise, there's no `-hostpci` flag — any `type: wifi` segment in
+  `-config-file` that identifies its radio by `pciVendor`+`pciDevice` is
+  passed straight through to the new VM automatically
+  (`internal/config.Config.WifiPCIDevices`, deduplicated — this project's
+  own wifi-128/130/131 all share one physical card, so that's one
+  `hostpci0`, not three). Unlike every other setting `create` derives,
+  this genuinely can't be resolved in a dry run: the vendor:device ID
+  pair is stable hardware identity, but which PCI *bus address* it's
+  actually sitting at right now is a live fact about the Proxmox host, so
+  those steps only run (one `lspci -n -d` lookup + `qm set --hostpciN`
+  per distinct device, over ssh) when `-yes` is given — a dry-run plan
+  just shows that the step exists, not the address it'll resolve to. Wifi
+  segments identified by `ifname`/`mac`/auto-discovery instead contribute
+  nothing here (there's no PCI ID to look an address up for) — passthrough
+  for those still has to be set up by hand, same as the manual-VM path in
+  Setup above.
 - If any segment is `type: native`, `net0` is generated with **no**
   `tag=`/`trunks=` at all, not `tag=<native>,trunks=<rest>` — on an OVS
   bridge, giving the untagged segment an explicit `tag=` routes it
