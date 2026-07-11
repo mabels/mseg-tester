@@ -16,6 +16,7 @@ package_update: true
 package_upgrade: true    # dist-upgrade everything already installed on first boot, not just refresh the apt index -- see cloud-init/user-data.yaml's twin of this file, kept in parity
 packages:
   - ca-certificates
+  - git                   # for the local checkout mseg-tester-bootstrap.sh clones and internal/selfupdate keeps updated
   - wpasupplicant         # required for netplan's wifis: stanza -- see the segment "wifi-*" entries in -config-file/ConfigYAML above
   - linux-firmware        # the mt7921e driver (MediaTek MT7922) needs firmware blobs not always current on the base
                           # cloud image -- confirmed live: "Direct firmware load for mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin
@@ -106,7 +107,7 @@ write_files:
       trunkInterface: {{.TrunkIface}}
       updateSegment: "{{.UpdateSegment}}"
       softwareRepo: "{{.SoftwareRepo}}"
-      softwareRef: "{{if .SoftwareRef}}{{.SoftwareRef}}{{else}}latest{{end}}"
+      softwareRef: "{{if .SoftwareRef}}{{.SoftwareRef}}{{else}}main{{end}}"
       configRepo: "{{.ConfigRepo}}"
       configPath: "{{.ConfigPath}}"
       configRef: "{{.ConfigRef}}"
@@ -139,55 +140,68 @@ write_files:
 {{- end}}
 
 
-  # Builds straight from source via `go install` (no GitHub release, no
-  # build pipeline, no asset naming to keep in sync -- see
-  # internal/selfupdate's package doc) using softwareRepo/softwareRef
-  # read directly out of bootstrap.yaml above, so -module-ref (which just
-  # sets softwareRef) is the ONE place that needs to change to exercise
-  # an unreleased branch or commit -- no separate binary-hosting side
-  # channel needed ("test without gh"). Retries until it succeeds:
-  # cloud-init boots this VM before there's necessarily any guarantee
-  # network-online has fully settled.
+  # Builds straight from a local git checkout (`go build`, not `go
+  # install` -- no GitHub release, no build pipeline, no asset naming to
+  # keep in sync -- see internal/selfupdate's package doc) using
+  # softwareRepo/softwareRef read directly out of bootstrap.yaml above,
+  # so -module-ref (which just sets softwareRef) is the ONE place that
+  # needs to change to exercise an unreleased branch or commit -- no
+  # separate binary-hosting side channel needed ("test without gh").
+  # Retries until it succeeds: cloud-init boots this VM before there's
+  # necessarily any guarantee network-online has fully settled.
   #
-  # The Go toolchain itself is installed HERE, from the official tarball
-  # at go.dev, not via an apt package -- golang-go's availability/name
-  # varies by Ubuntu release and archive component (confirmed missing on
-  # at least one real image), whereas go.dev's tarball URL scheme has
-  # been stable for years and needs nothing but https. /usr/local/go/bin
-  # also has to be on the mseg-tester.service unit's own PATH for later
-  # self-updates -- see internal/deploy/mseg-tester.service.
+  # The clone+fetch+reset sequence below deliberately mirrors
+  # internal/selfupdate's own steady-state update logic exactly (clone
+  # only if the checkout doesn't exist yet, then always fetch+reset to
+  # softwareRef) -- one mechanism, described once, not two independently
+  # -- the ONLY difference here is there's no baked-in commit to compare
+  # against yet, so the very first build always happens unconditionally.
+  #
+  # The Go toolchain itself is installed via `snap install go --classic`,
+  # not an apt package or a hand-extracted tarball from go.dev -- simpler
+  # and one less thing this script has to manage itself. Assumes snapd is
+  # already present, which it is on stock Ubuntu Server cloud images.
+  # /snap/bin also has to be on the mseg-tester.service unit's own PATH
+  # for later self-updates -- see internal/deploy/mseg-tester.service.
   - path: /usr/local/sbin/mseg-tester-bootstrap.sh
     permissions: "0755"
     content: |
       #!/bin/sh
       set -e
       export HOME="${HOME:-/root}"
-      export PATH="/usr/local/go/bin:$PATH"
+      export PATH="/snap/bin:$PATH"
 
       if ! command -v go >/dev/null 2>&1; then
-        echo "mseg-tester-bootstrap: installing Go toolchain from go.dev" | systemd-cat -t mseg-tester-bootstrap
-        goarch=$(dpkg --print-architecture)
-        gover=$(curl -fsSL https://go.dev/VERSION?m=text | head -1)
-        curl -fsSL -o /tmp/go.tar.gz "https://go.dev/dl/${gover}.linux-${goarch}.tar.gz"
-        rm -rf /usr/local/go
-        tar -C /usr/local -xzf /tmp/go.tar.gz
-        rm -f /tmp/go.tar.gz
+        echo "mseg-tester-bootstrap: installing Go via snap" | systemd-cat -t mseg-tester-bootstrap
+        i=0
+        until snap install go --classic; do
+          i=$((i + 1))
+          echo "mseg-tester-bootstrap: snap install go failed, attempt $i, retrying in 30s" | systemd-cat -t mseg-tester-bootstrap
+          sleep 30
+        done
       fi
 
       bootstrap_yaml="/mseg-tester/bootstrap.yaml"
       software_repo=$(sed -n 's/^softwareRepo: *"\(.*\)"/\1/p' "$bootstrap_yaml")
       software_ref=$(sed -n 's/^softwareRef: *"\(.*\)"/\1/p' "$bootstrap_yaml")
-      [ -n "$software_ref" ] || software_ref="latest"
-      module="github.com/${software_repo}/cmd/mseg-tester"
+      [ -n "$software_ref" ] || software_ref="main"
+      repo_url="https://github.com/${software_repo}.git"
+      src_dir="/mseg-tester/src"
       dest="/usr/local/bin/mseg-tester"
-      echo "mseg-tester-bootstrap: go install ${module}@${software_ref}" | systemd-cat -t mseg-tester-bootstrap
 
+      echo "mseg-tester-bootstrap: fetching ${repo_url}@${software_ref} into ${src_dir}" | systemd-cat -t mseg-tester-bootstrap
       i=0
-      until GOBIN=/usr/local/bin go install "${module}@${software_ref}"; do
+      until \
+        { [ -d "$src_dir/.git" ] || git clone --depth 1 "$repo_url" "$src_dir"; } && \
+        git -C "$src_dir" fetch --depth 1 origin "$software_ref" && \
+        git -C "$src_dir" reset --hard FETCH_HEAD && \
+        (cd "$src_dir" && go build -o "${dest}.new" ./cmd/mseg-tester)
+      do
         i=$((i + 1))
         echo "mseg-tester-bootstrap: attempt $i failed, retrying in 30s" | systemd-cat -t mseg-tester-bootstrap
         sleep 30
       done
+      mv "${dest}.new" "$dest"
       echo "mseg-tester-bootstrap: binary installed" | systemd-cat -t mseg-tester-bootstrap
 
       echo "mseg-tester-bootstrap: running deploy" | systemd-cat -t mseg-tester-bootstrap
@@ -200,7 +214,7 @@ write_files:
     permissions: "0644"
     content: |
       [Unit]
-      Description=mseg-tester: one-time build+deploy (retries until `go install` succeeds)
+      Description=mseg-tester: one-time clone+build+deploy (retries until it succeeds)
       After=network-online.target
       Wants=network-online.target
       ConditionPathExists=!/usr/local/bin/mseg-tester

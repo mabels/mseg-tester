@@ -131,17 +131,24 @@ happens, not just the final summary.
    result (including whatever's pushed to `report.url`/`report.influx`)
    can always be traced back to an exact commit.
 8. **Only if** the segment just tested is `updateSegment`:
-   - rebuild itself via `go install` straight from `softwareRepo`'s
-     source and replace itself if the result differs (`internal/selfupdate`
-     — no GitHub release, no build pipeline, no asset to keep in sync);
+   - update the local git checkout of `softwareRepo` at
+     `internal/selfupdate.DefaultSrcDir` (`/mseg-tester/src`) — clone it
+     first if it doesn't exist yet, then always `git fetch`+`git reset
+     --hard` to `softwareRef`'s current tip (conflict-free by
+     construction: local state is always discarded, never merged) — and
+     only if that HEAD commit differs from the one THIS binary was
+     itself built from (`selfupdate.BuildInfo().Revision`) rebuild via
+     `go build` and replace itself (`internal/selfupdate` — no GitHub
+     release, no build pipeline, no asset to keep in sync, no Go module
+     proxy involved at all);
    - if `config.yaml` sets `report.url`, POST every accumulated
      `<segment>.result.yaml` there as JSON (`internal/report.Push`); if it
      sets `report.influx`, write them straight into an InfluxDB v2 bucket
      as line protocol instead/as well (`internal/report.PushInflux`).
      Either, both, or neither may be set.
 
-   Every other segment skips all of this — there's nothing to reach the
-   module proxy/GitHub or the report target(s) through.
+   Every other segment skips all of this — there's nothing to reach
+   GitHub or the report target(s) through.
 9. **Unless `active.yaml`'s `stopOn` equals the segment just tested**:
    write netplan for the *next* segment in the cycle, advance
    `active.yaml`, sleep `config.yaml`'s `rebootDelay` (if set), and
@@ -227,37 +234,40 @@ block:
   with `REPLACE_ME` placeholders — they will **not** resolve on their own).
 
 First boot brings up segment 129 directly (the only one cloud-init itself
-can reach the internet through), installs the Go toolchain from the
-official tarball at go.dev (not an apt package — see the bootstrap
-script's comments for why), builds the binary via `go install`, runs
-`mseg-tester deploy` (installs the systemd unit), and reboots into the
-first real cycle. If `configRepo` is set, the unit's own first `run` also
-syncs `config.yaml` from it.
+can reach the internet through), installs the Go toolchain via `snap
+install go --classic` (not an apt package or a hand-extracted tarball —
+one less thing the bootstrap script has to manage itself; assumes snapd
+is already present, which it is on stock Ubuntu Server cloud images),
+clones `softwareRepo` into `/mseg-tester/src`, resets it to `softwareRef`,
+builds the binary with a plain `go build`, runs `mseg-tester deploy`
+(installs the systemd unit), and reboots into the first real cycle. If
+`configRepo` is set, the unit's own first `run` also syncs `config.yaml`
+from it.
 
 ## Releasing an update
 
-There's no build pipeline, no release, no binary asset: `go install
-github.com/<softwareRepo>/cmd/mseg-tester@<softwareRef>` builds straight
-from source, both for the first install (the cloud-init bootstrap
-script) and every later self-update (`internal/selfupdate`). Pushing a
-commit is the whole release process —
+There's no build pipeline, no release, no binary asset, and no Go module
+proxy involved at all: pushing a commit is the whole release process —
 
 ```sh
 git push origin main
 ```
 
-— and the next time the cycle reaches `updateSegment`, every VM rebuilds
-itself and picks it up. `softwareRef` (in `bootstrap.yaml`) defaults to
-`"latest"` (the newest semver tag); tag a commit `vX.Y.Z` and push the
-tag if you want that discipline, or leave it on `"latest"` tracking a
-branch's tip — either works, `go install` resolves both.
+— and the next time the cycle reaches `updateSegment`, every VM's local
+checkout at `/mseg-tester/src` gets `git fetch`+`git reset --hard` to
+`softwareRef`'s new tip (`internal/selfupdate`), compares that HEAD
+commit against the one baked into the binary currently running
+(`selfupdate.BuildInfo().Revision` — reliably populated because every
+build, first boot and every self-update since, is a plain `go build`
+inside a real git checkout, no `-ldflags` needed), and only rebuilds+
+replaces itself if they differ. `softwareRef` (in `bootstrap.yaml`)
+defaults to `"main"`.
 
 This also sidesteps a real problem the old GitHub-Releases design would
 eventually hit: checking `api.github.com` for a new release on every
 VM's own cycle is subject to GitHub's unauthenticated REST API rate
-limit (60 requests/hour per source IP). `go install` talks to the Go
-module proxy (or git directly) instead, which isn't rate-limited the
-same way.
+limit (60 requests/hour per source IP). Plain `git fetch` against
+GitHub's own git servers isn't rate-limited the same way.
 
 Point `softwareRef` at your own branch or a commit SHA (`-module-ref` in
 `cmd/verify-mseg-tester`) to run unreleased code with zero release step
@@ -271,7 +281,7 @@ at all.
 | `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
 | `mseg-tester render-netplan -config path -segment name [-trunk-iface name]` | Whenever you want to eyeball a segment's netplan | Prints exactly what `internal/netplan.Write` would install for that segment, from a local `config.yaml` — no VM, no network, no shell-on-the-box needed. Handy when a box is stuck at boot (e.g. `systemd-networkd-wait-online`) and unreachable: run this locally against the same `config.yaml` instead |
 | `mseg-tester find-iface [-mac addr] [-pci-vendor id -pci-device id]` | On the guest, whenever you want to check what a `"wifi"` segment's `mac`/`pciVendor`+`pciDevice` (or auto-discovery, if none of the flags are given) would resolve to right now | Runs the same `internal/ifdiscover` resolution a `"wifi"` segment goes through at boot, and prints the resulting interface name (or the error you'd otherwise only see in a failed cycle's logs) — a fast way to sanity-check a MAC or PCI vendor/device pair against the guest's actual hardware before putting it in `config.yaml` |
-| `mseg-tester version` (`-version`/`--version` also work) | Whenever you SSH/console into a box and want to know which commit it's actually running | Prints `selfupdate.BuildInfo()` — the same commit-identifying version string recorded into every `state.Result` (see `Version` below). For a self-updated binary (`go install module@ref`) this is a Go module pseudo-version whose last 12 hex characters are the git commit it was built from — no `-ldflags` needed, the Go toolchain embeds this automatically |
+| `mseg-tester version` (`-version`/`--version` also work) | Whenever you SSH/console into a box and want to know which commit it's actually running | Prints `selfupdate.BuildInfo()` — the same commit-identifying version string recorded into every `state.Result` (see `Version` below). Every build (first boot and every self-update since) happens as a plain `go build` inside a real local git checkout, so this is normally the full 40-character commit SHA (`Revision`) alongside a Go module pseudo-version (`Version`) whose last 12 hex characters are that same commit — no `-ldflags` needed, the Go toolchain stamps this automatically |
 
 ## `bootstrap.yaml` reference (`/mseg-tester/bootstrap.yaml`)
 
@@ -279,8 +289,8 @@ at all.
 |---|---|
 | `trunkInterface` | The guest NIC carrying every segment's VLAN tag |
 | `updateSegment` | The one segment config-sync/self-update/report are attempted from |
-| `softwareRepo` | `owner/repo`, assumed to be on `github.com` — built into a Go module path (`github.com/<softwareRepo>/cmd/mseg-tester`) that `go install` builds directly, no release step |
-| `softwareRef` | Git branch/tag/commit `go install` builds — for both the first install and every self-update. Defaults to `"latest"` (the newest semver tag) if empty |
+| `softwareRepo` | `owner/repo`, assumed to be on `github.com` — turned into a git clone URL (`https://github.com/<softwareRepo>.git`) for the local checkout at `internal/selfupdate.DefaultSrcDir` (`/mseg-tester/src`), built directly with `go build`, no release step |
+| `softwareRef` | Git branch/tag/commit the local checkout is `git fetch`+`git reset --hard` to — for both the first checkout and every later self-update. Defaults to `"main"` if empty |
 | `configRepo` | Optional. URL of a repo to fetch/refresh the real `config.yaml` from, e.g. `https://github.com/owner/repo` (a bare `owner/repo` or the `git@github.com:owner/repo.git` SSH form also work). Empty (the default) means "just use the plain `config.yaml` cloud-init already wrote" — no repo, no token, nothing fetched |
 | `configPath` | Path of `config.yaml` within `configRepo`. Ignored when `configRepo` is empty |
 | `configRef` | Branch/tag/commit to fetch it at. Ignored when `configRepo` is empty |
@@ -478,8 +488,8 @@ Notes:
   later config-sync reintroduces a placeholder this create-time pass
   never saw.
 - `-module-ref` sets `bootstrap.yaml`'s `softwareRef` — the git
-  branch/tag/commit the bootstrap script's `go install` (and every later
-  self-update) builds `-software-repo` from. Defaults to `"latest"`.
+  branch/tag/commit the bootstrap script's local checkout (and every
+  later self-update) tracks `-software-repo` at. Defaults to `"main"`.
   Point it at your own branch or a commit SHA to exercise unreleased
   code end-to-end — no GitHub release, no build pipeline, no
   binary-hosting side channel needed at all.

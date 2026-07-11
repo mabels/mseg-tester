@@ -1,22 +1,57 @@
 package selfupdate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-// withFakeGoInstall replaces goInstall for the duration of one test with
-// a fake that writes content to <gobin>/<base of modulePath> instead of
-// actually invoking the Go toolchain -- these tests exercise the
-// hash-compare/replace logic, not `go install` itself.
-func withFakeGoInstall(t *testing.T, content []byte) {
+// fakeGitState is the shared state a test's faked git/go seams read and
+// write, so a test can drive "no checkout yet" -> "cloned" -> "fetched
+// to some HEAD" -> "built" without a real git binary, network, or Go
+// toolchain.
+type fakeGitState struct {
+	cloned     bool
+	clonedFrom string
+	head       string // what gitFetchReset/gitRevParseHEAD report after being called
+	built      []byte // content goBuild "produces"
+}
+
+// withFakeGitAndBuild replaces gitClone/gitFetchReset/gitRevParseHEAD/
+// goBuild for the duration of one test, backed by fs (a real temp dir
+// standing in for srcDir -- gitClone/gitFetchReset just touch a marker
+// file there so os.Stat(filepath.Join(srcDir, ".git")) behaves
+// correctly for checkAndApply's own "does the checkout already exist"
+// check).
+func withFakeGitAndBuild(t *testing.T, st *fakeGitState) {
 	t.Helper()
-	orig := goInstall
-	goInstall = func(modulePath, ref, gobin string) error {
-		return os.WriteFile(filepath.Join(gobin, filepath.Base(modulePath)), content, 0o755)
+	origClone, origFetch, origRev, origBuild := gitClone, gitFetchReset, gitRevParseHEAD, goBuild
+
+	gitClone = func(repoURL, dir string) error {
+		st.cloned = true
+		st.clonedFrom = repoURL
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, ".git"), []byte("fake"), 0o644)
 	}
-	t.Cleanup(func() { goInstall = orig })
+	gitFetchReset = func(dir, ref string) error {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+			return fmt.Errorf("gitFetchReset called before clone: %w", err)
+		}
+		return nil
+	}
+	gitRevParseHEAD = func(dir string) (string, error) {
+		return st.head, nil
+	}
+	goBuild = func(srcDir, out string) error {
+		return os.WriteFile(out, st.built, 0o755)
+	}
+
+	t.Cleanup(func() {
+		gitClone, gitFetchReset, gitRevParseHEAD, goBuild = origClone, origFetch, origRev, origBuild
+	})
 }
 
 func writeSelf(t *testing.T, content []byte) string {
@@ -29,37 +64,40 @@ func writeSelf(t *testing.T, content []byte) string {
 	return self
 }
 
-func TestCheckAndApplySameContentIsNoop(t *testing.T) {
-	content := []byte("same bytes")
-	self := writeSelf(t, content)
-	withFakeGoInstall(t, content)
+func TestCheckAndApplyCurrentRevisionMatchesHeadIsNoop(t *testing.T) {
+	self := writeSelf(t, []byte("running binary bytes"))
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "abc123", built: []byte("would-be-new-bytes")}
+	withFakeGitAndBuild(t, st)
 
-	res, err := checkAndApply("github.com/mabels/mseg-tester/cmd/mseg-tester", "latest", self)
+	res, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, "abc123")
 	if err != nil {
 		t.Fatalf("checkAndApply: %v", err)
 	}
 	if res.Applied {
-		t.Error("expected Applied=false when the built binary matches self")
+		t.Error("expected Applied=false when currentRevision already matches HEAD")
 	}
 	got, err := os.ReadFile(self)
 	if err != nil {
 		t.Fatalf("reading self: %v", err)
 	}
-	if string(got) != string(content) {
-		t.Errorf("self was modified, got %q want %q", got, content)
+	if string(got) != "running binary bytes" {
+		t.Errorf("self was modified even though no update was needed, got %q", got)
 	}
 }
 
-func TestCheckAndApplyDifferentContentReplacesSelf(t *testing.T) {
+func TestCheckAndApplyDifferentHeadRebuildsAndReplacesSelf(t *testing.T) {
 	self := writeSelf(t, []byte("old bytes"))
-	withFakeGoInstall(t, []byte("new bytes"))
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "def456", built: []byte("new bytes")}
+	withFakeGitAndBuild(t, st)
 
-	res, err := checkAndApply("github.com/mabels/mseg-tester/cmd/mseg-tester", "latest", self)
+	res, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, "abc123")
 	if err != nil {
 		t.Fatalf("checkAndApply: %v", err)
 	}
 	if !res.Applied {
-		t.Error("expected Applied=true when the built binary differs from self")
+		t.Error("expected Applied=true when HEAD differs from currentRevision")
 	}
 	got, err := os.ReadFile(self)
 	if err != nil {
@@ -77,49 +115,110 @@ func TestCheckAndApplyDifferentContentReplacesSelf(t *testing.T) {
 	}
 }
 
-func TestCheckAndApplyDefaultsRefToLatest(t *testing.T) {
+func TestCheckAndApplyEmptyCurrentRevisionAlwaysRebuilds(t *testing.T) {
+	// An empty currentRevision (build info unavailable) must never be
+	// treated as "matches" -- always rebuild rather than risk silently
+	// skipping a genuinely-needed update.
 	self := writeSelf(t, []byte("old bytes"))
-	var gotRef string
-	orig := goInstall
-	goInstall = func(modulePath, ref, gobin string) error {
-		gotRef = ref
-		return os.WriteFile(filepath.Join(gobin, filepath.Base(modulePath)), []byte("old bytes"), 0o755)
-	}
-	t.Cleanup(func() { goInstall = orig })
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "same-as-nothing", built: []byte("new bytes")}
+	withFakeGitAndBuild(t, st)
 
-	if _, err := checkAndApply("github.com/mabels/mseg-tester/cmd/mseg-tester", "", self); err != nil {
+	res, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, "")
+	if err != nil {
 		t.Fatalf("checkAndApply: %v", err)
 	}
-	if gotRef != "latest" {
-		t.Errorf("ref = %q, want %q (empty should default)", gotRef, "latest")
+	if !res.Applied {
+		t.Error("expected Applied=true when currentRevision is empty")
+	}
+}
+
+func TestCheckAndApplyClonesWhenSrcDirMissing(t *testing.T) {
+	self := writeSelf(t, []byte("old bytes"))
+	srcDir := filepath.Join(t.TempDir(), "src") // deliberately not created
+	st := &fakeGitState{head: "abc123", built: []byte("new bytes")}
+	withFakeGitAndBuild(t, st)
+
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, ""); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if !st.cloned {
+		t.Error("expected gitClone to be called when srcDir doesn't exist yet")
+	}
+	if st.clonedFrom != "https://github.com/mabels/mseg-tester.git" {
+		t.Errorf("cloned from %q, want the given repoURL", st.clonedFrom)
+	}
+}
+
+func TestCheckAndApplyDoesNotReCloneWhenSrcDirExists(t *testing.T) {
+	self := writeSelf(t, []byte("old bytes"))
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, ".git"), []byte("fake"), 0o644); err != nil {
+		t.Fatalf("seeding .git marker: %v", err)
+	}
+	st := &fakeGitState{head: "abc123", built: []byte("new bytes")}
+	withFakeGitAndBuild(t, st)
+
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, ""); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if st.cloned {
+		t.Error("expected gitClone NOT to be called when srcDir already has a .git checkout")
+	}
+}
+
+func TestCheckAndApplyDefaultsRefToMain(t *testing.T) {
+	self := writeSelf(t, []byte("old bytes"))
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "abc123", built: []byte("old bytes")}
+
+	var gotRef string
+	origClone, origFetch, origRev, origBuild := gitClone, gitFetchReset, gitRevParseHEAD, goBuild
+	gitClone = func(repoURL, dir string) error {
+		return os.MkdirAll(dir, 0o755)
+	}
+	gitFetchReset = func(dir, ref string) error {
+		gotRef = ref
+		return nil
+	}
+	gitRevParseHEAD = func(dir string) (string, error) { return st.head, nil }
+	goBuild = func(srcDir, out string) error { return os.WriteFile(out, st.built, 0o755) }
+	t.Cleanup(func() { gitClone, gitFetchReset, gitRevParseHEAD, goBuild = origClone, origFetch, origRev, origBuild })
+
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "", self, "abc123"); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if gotRef != "main" {
+		t.Errorf("ref = %q, want %q (empty should default)", gotRef, "main")
+	}
+}
+
+func TestCheckAndApplyFetchFailureIsAnError(t *testing.T) {
+	self := writeSelf(t, []byte("old bytes"))
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, ".git"), []byte("fake"), 0o644); err != nil {
+		t.Fatalf("seeding .git marker: %v", err)
+	}
+	orig := gitFetchReset
+	gitFetchReset = func(dir, ref string) error { return fmt.Errorf("network is down") }
+	t.Cleanup(func() { gitFetchReset = orig })
+
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, ""); err == nil {
+		t.Error("expected an error when gitFetchReset fails")
 	}
 }
 
 func TestCheckAndApplyBuildFailureIsAnError(t *testing.T) {
 	self := writeSelf(t, []byte("old bytes"))
-	orig := goInstall
-	goInstall = func(modulePath, ref, gobin string) error {
-		return os.ErrPermission
-	}
-	t.Cleanup(func() { goInstall = orig })
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "abc123"}
+	withFakeGitAndBuild(t, st)
+	orig := goBuild
+	goBuild = func(srcDir, out string) error { return os.ErrPermission }
+	t.Cleanup(func() { goBuild = orig })
 
-	if _, err := checkAndApply("github.com/mabels/mseg-tester/cmd/mseg-tester", "latest", self); err == nil {
-		t.Error("expected an error when goInstall fails")
-	}
-}
-
-func TestCurrentVersionIsShortAndStable(t *testing.T) {
-	// CheckAndApply's own byte-identical-replace logic is exercised above
-	// via checkAndApply and still relies on fileSHA256 -- unrelated to
-	// CurrentVersion/BuildInfo below (build-info-derived, not content
-	// hashing), just confirming that helper's own contract here.
-	self := writeSelf(t, []byte("hello"))
-	h, err := fileSHA256(self)
-	if err != nil {
-		t.Fatalf("fileSHA256: %v", err)
-	}
-	if len(h) < 12 {
-		t.Fatalf("hash too short to slice to 12: %q", h)
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, ""); err == nil {
+		t.Error("expected an error when goBuild fails")
 	}
 }
 
@@ -127,8 +226,7 @@ func TestBuildInfoNeverPanicsAndReturnsAVersion(t *testing.T) {
 	// Running inside `go test`, this reads the TEST binary's own build
 	// info, not a real mseg-tester build -- can't assert an exact commit
 	// here, just that reading it degrades gracefully (never panics,
-	// Version is never empty -- "(unknown)" is the deliberate fallback)
-	// the same way it would for module-mode build lacking VCS info.
+	// Version is never empty -- "(unknown)" is the deliberate fallback).
 	b := BuildInfo()
 	if b.Version == "" {
 		t.Errorf("BuildInfo().Version should never be empty, got %q", b.Version)

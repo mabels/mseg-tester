@@ -128,13 +128,13 @@ type Params struct {
 	// provisioned once, by hand, per VM.
 	EnvFile string
 	// SoftwareRef is OPTIONAL -- the git branch/tag/commit the bootstrap
-	// script's `go install` (and every later self-update,
-	// internal/selfupdate) builds from. Defaults to "latest" (the newest
-	// semver tag) if empty. Point it at your own branch or a commit SHA
-	// to exercise this whole tool against unreleased code -- no GitHub
-	// release, no build pipeline, no binary-hosting side channel needed
-	// ("test without gh"): `go install` fetches straight from
-	// SoftwareRepo's git history via the Go module proxy.
+	// script's local checkout (and every later self-update,
+	// internal/selfupdate) tracks. Defaults to "main" if empty. Point it
+	// at your own branch or a commit SHA to exercise this whole tool
+	// against unreleased code -- no GitHub release, no build pipeline,
+	// no binary-hosting side channel needed ("test without gh"): the
+	// bootstrap script clones SoftwareRepo directly and `git fetch`+
+	// `git reset --hard`s to this ref.
 	SoftwareRef string
 	// ConsolePassword is OPTIONAL -- a plaintext password cloud-init
 	// hashes into /etc/shadow for the "ubuntu" user, for logging in on

@@ -37,16 +37,20 @@ type Bootstrap struct {
 	// == "native"); both are handled -- see internal/netplan.IfaceName.
 	UpdateSegment string `yaml:"updateSegment"`
 	// SoftwareRepo is "owner/repo" (assumed to be on github.com) for this
-	// tool's own PUBLIC source -- internal/selfupdate builds it into a Go
-	// module path ("github.com/" + SoftwareRepo + "/cmd/mseg-tester") and
-	// runs `go install` against it directly. No GitHub release or build
-	// pipeline is involved: any commit pushed to this repo is installable.
+	// tool's own PUBLIC source -- internal/selfupdate turns it into a git
+	// clone URL ("https://github.com/" + SoftwareRepo + ".git") for a
+	// local checkout it builds from directly (`go build`, not `go
+	// install` -- see internal/selfupdate's package doc). No GitHub
+	// release or build pipeline is involved: any commit pushed to this
+	// repo is buildable.
 	SoftwareRepo string `yaml:"softwareRepo"`
-	// SoftwareRef is the git branch/tag/commit `go install` fetches --
-	// both for the very first install (see the cloud-init bootstrap
-	// script, which reads this file directly) and every subsequent
-	// self-update (internal/selfupdate). Defaults to "latest" (the
-	// newest semver tag) if left empty. Point this at a branch or commit
+	// SoftwareRef is the git branch/tag/commit the local checkout at
+	// internal/selfupdate.DefaultSrcDir tracks -- both for the very
+	// first checkout (see the cloud-init bootstrap script, which reads
+	// this file directly) and every subsequent self-update
+	// (internal/selfupdate: `git fetch`+`git reset --hard` to this ref's
+	// current tip, every time the update segment comes around). Defaults
+	// to "main" if left empty. Point this at your own branch or a commit
 	// SHA to run unreleased code with no build/release step at all --
 	// see cmd/verify-mseg-tester's -module-ref.
 	SoftwareRef string `yaml:"softwareRef,omitempty"`
@@ -122,7 +126,7 @@ func Load(path string) (Bootstrap, error) {
 		b.ConfigLocalPath = "/mseg-tester/config.yaml"
 	}
 	if b.SoftwareRef == "" {
-		b.SoftwareRef = "latest"
+		b.SoftwareRef = "main"
 	}
 	if b.EnvFile == "" {
 		b.EnvFile = "/mseg-tester/.env"

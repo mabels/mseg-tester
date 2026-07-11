@@ -5,14 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# HOME is needed so a self-update's `go install` (see internal/selfupdate)
+# HOME is needed so a self-update's `go build` (see internal/selfupdate)
 # resolves GOCACHE/GOMODCACHE the same way every boot -- system units
-# don't reliably inherit a HOME env var otherwise. PATH needs
-# /usr/local/go/bin because Go is installed from the official tarball
-# (see the cloud-init bootstrap script), not an apt package -- system
-# units get a minimal default PATH that doesn't include it.
+# don't reliably inherit a HOME env var otherwise. PATH needs /snap/bin
+# because Go is installed via `snap install go --classic` (see the
+# cloud-init bootstrap step), not an apt package or a hand-extracted
+# tarball -- system units get a minimal default PATH that doesn't
+# include it.
 Environment=HOME=/root
-Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/snap/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/mseg-tester run
 RemainAfterExit=yes
 

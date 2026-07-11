@@ -185,11 +185,11 @@ func TestRenderUserDataDefaultSoftwareRef(t *testing.T) {
 		t.Fatalf("RenderUserData: %v", err)
 	}
 	s := string(out)
-	if !strings.Contains(s, `softwareRef: "latest"`) {
-		t.Errorf("expected softwareRef to default to \"latest\", got:\n%s", s)
+	if !strings.Contains(s, `softwareRef: "main"`) {
+		t.Errorf("expected softwareRef to default to \"main\", got:\n%s", s)
 	}
-	if !strings.Contains(s, "GOBIN=/usr/local/bin go install") {
-		t.Errorf("expected the bootstrap script to `go install`, got:\n%s", s)
+	if !strings.Contains(s, "go build -o \"${dest}.new\" ./cmd/mseg-tester") {
+		t.Errorf("expected the bootstrap script to `go build` from a local checkout, got:\n%s", s)
 	}
 	assertValidYAML(t, out)
 }

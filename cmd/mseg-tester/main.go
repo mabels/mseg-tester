@@ -46,11 +46,13 @@
 //	                             up to config.CheckAttempts times if any
 //	                             single check in it failed,
 //	                          5. records the result,
-//	                          6. on the update segment: rebuilds itself via
-//	                             `go install` straight from source and
-//	                             replaces its own executable if the result
-//	                             differs (internal/selfupdate), then POSTs
-//	                             every accumulated result to
+//	                          6. on the update segment: updates its local git
+//	                             checkout (clone if missing, else fetch+reset
+//	                             --hard to softwareRef) and rebuilds+replaces
+//	                             its own executable only if that checkout's
+//	                             HEAD differs from the commit this binary was
+//	                             itself built from (internal/selfupdate),
+//	                             then POSTs every accumulated result to
 //	                             config.Report.URL if set (internal/report),
 //	                          7. unless active.yaml's StopOn equals the
 //	                             segment just tested (see
@@ -548,21 +550,21 @@ func applyTimezone(tz string, verbose bool) {
 // missing one update just means trying again next time this segment
 // comes back around in the cycle.
 func applyUpdateCheck(boot bootstrap.Bootstrap, result *state.Result, verbose bool) {
-	modulePath := fmt.Sprintf("github.com/%s/cmd/mseg-tester", boot.SoftwareRepo)
+	repoURL := fmt.Sprintf("https://github.com/%s.git", boot.SoftwareRepo)
 	if verbose {
-		log.Printf("run: checking for update: go install %s@%s", modulePath, boot.SoftwareRef)
+		log.Printf("run: checking for update: %s @ %s (checkout at %s)", repoURL, boot.SoftwareRef, selfupdate.DefaultSrcDir)
 	}
-	up, err := selfupdate.CheckAndApply(modulePath, boot.SoftwareRef)
+	up, err := selfupdate.CheckAndApply(selfupdate.DefaultSrcDir, repoURL, boot.SoftwareRef)
 	if err != nil {
 		result.Checks = append(result.Checks, state.CheckResult{
 			Name: "selfupdate", Pass: false, Detail: err.Error(),
 		})
 		return
 	}
-	detail := fmt.Sprintf("already at %s@%s", modulePath, boot.SoftwareRef)
+	detail := fmt.Sprintf("already at %s @ %s", repoURL, boot.SoftwareRef)
 	if up.Applied {
 		result.Updated = true
-		detail = fmt.Sprintf("installed %s@%s", modulePath, boot.SoftwareRef)
+		detail = fmt.Sprintf("installed %s @ %s", repoURL, boot.SoftwareRef)
 	}
 	result.Checks = append(result.Checks, state.CheckResult{Name: "selfupdate", Pass: true, Detail: detail})
 }
