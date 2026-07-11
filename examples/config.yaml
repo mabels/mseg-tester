@@ -114,19 +114,22 @@ report:
     bucket: "mseg-tester"
     token: "${INFLUX_TOKEN}"
 
-  # Optional. Throttles config-sync/self-update/report (this whole
-  # updateSegment-only block, including the influx push above and
-  # bootstrap.yaml's softwareRepo/softwareRef/configRepo) to run at most
-  # once per waitDelay, no matter how often the reboot cycle happens to
-  # revisit "on" -- segment checks (dhcp/dns/routing/...) and the reboot
-  # cycle itself are never throttled by this, only that one block. Handy
-  # when rebootDelay above is short enough that the update segment would
-  # otherwise come back around -- and re-fetch config.yaml, re-check for
-  # a software update, re-push a report -- far more often than is
-  # useful. Lives under report (not its own top-level section) because
-  # it's throttling that same reachability-constrained block, not
-  # reporting specifically. Omit entirely to run on every single visit
-  # (the old default). See internal/config.Wait.
+  # Optional. Replaces rebootDelay above with waitDelay below, but only
+  # for segment "on" (normally bootstrap.yaml's updateSegment) -- every
+  # other segment still uses the plain rebootDelay. config-sync/
+  # self-update/report (this whole updateSegment-only block, including
+  # the influx push above and bootstrap.yaml's softwareRepo/softwareRef/
+  # configRepo) run unconditionally on every visit to "on", so THIS delay
+  # is what keeps those infrequent, by making visits to "on" themselves
+  # infrequent -- handy when rebootDelay above is short enough that the
+  # update segment would otherwise come back around, and re-run all of
+  # that, far more often than is useful. Segment checks (dhcp/dns/
+  # routing/...) are never affected either way -- they run on every
+  # visit, whatever the delay. Lives under report (not its own top-level
+  # section) because it's about that same reachability-constrained
+  # block's timing, not reporting specifically. Omit entirely to use
+  # rebootDelay everywhere, including on "on" (the old default). See
+  # internal/config.Wait.
   wait:
     on: "129"          # must match one of bootstrap.yaml's updateSegment / a segment name below
     waitDelay: "10m"   # Go duration string; defaults to "10m" if omitted

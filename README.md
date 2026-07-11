@@ -54,12 +54,32 @@ recorded if every attempt still had a failure. Pass `mseg-tester run
 -verbose` to log each step and each check's pass/fail/detail as it
 happens, not just the final summary.
 
+One straight-line sequence, no branching state machine and nothing that
+throttles independently of it:
+
 1. Read `/mseg-tester/active.yaml` — which segment is active right now.
-2. **Only if** the active segment is `updateSegment` AND `bootstrap.yaml`'s
-   `configRepo` is set: fetch the latest `config.yaml` from that repo
-   (best-effort — a failed fetch just leaves the last successfully-synced,
-   or cloud-init-provisioned, `config.yaml` in place). Skipped entirely
-   when `configRepo` is empty.
+   If it doesn't exist (a genuinely fresh VM, or a state dir that's lost
+   it), DETECT the live segment instead of assuming any particular one:
+   compare each `config.yaml` segment's expected interface
+   (`internal/netplan.IfaceName`, resolving a `"wifi"` segment's real
+   interface first) against a live `ip a` snapshot
+   (`internal/ifaces.List`), and take whichever one is UP with a real
+   (non-link-local) address (`detectActiveSegment`/`matchActiveSegment`
+   in `cmd/mseg-tester`). This matters for more than just true first
+   boot: if `active.yaml` is lost partway through an already-cycling
+   box's lifetime (e.g. its state dir wiped while parked on a later
+   segment), assuming `updateSegment` would be wrong — this looks at
+   what's actually live instead. Falls back to `bootstrap.yaml`'s
+   `updateSegment`, logged, only if detection itself fails outright.
+2. **Only if** the active segment IS `updateSegment` (the "report
+   segment" — the only one with a route anywhere outside the segment
+   under test) AND `bootstrap.yaml`'s `configRepo` is set: fetch the
+   latest `config.yaml` from that repo (best-effort — a failed fetch
+   just leaves the last successfully-synced, or cloud-init-provisioned,
+   `config.yaml` in place). On a genuinely fresh VM (`active.yaml`
+   didn't exist at all), this is attempted unconditionally instead,
+   before the segment is even known — see step 1's fallback rationale.
+   Skipped entirely when `configRepo` is empty.
 3. Apply `config.yaml`'s `timezone` if set (`timedatectl set-timezone`) —
    idempotent and best-effort, never fatal.
 4. Discover which real interface is carrying this segment's traffic by
@@ -130,7 +150,10 @@ happens, not just the final summary.
    release) — the same string `mseg-tester version` prints, so any
    result (including whatever's pushed to `report.url`/`report.influx`)
    can always be traced back to an exact commit.
-8. **Only if** the segment just tested is `updateSegment` **and** `config.yaml`'s optional `report.wait` section isn't currently throttling it (see below):
+8. **Only if** the segment just tested IS `updateSegment` (the report
+   segment, same condition as step 2) — every single visit,
+   unconditionally, with nothing throttling this separately from step
+   9's delay below:
    - update the local git checkout of `softwareRepo` at
      `internal/selfupdate.DefaultSrcDir` (`/mseg-tester/src`) — clone it
      first if it doesn't exist yet, then always `git fetch`+`git reset
@@ -155,30 +178,28 @@ happens, not just the final summary.
 
    Every other segment skips all of this — there's nothing to reach
    GitHub or the report target(s) through.
-
-   `report.wait.on`/`report.wait.waitDelay` (`internal/config.Wait`)
-   OPTIONALLY throttle this entire block (config-sync too, not just
-   self-update/report — it lives under `report` because it's throttling
-   this whole reachability-constrained block, not reporting specifically,
-   and `report`/`wait` are only ever relevant together on the same
-   segment) to run at most once per `waitDelay`, tracked in a small
-   `<segment>.lastwait.yaml` marker (`internal/state.LastWait`) separate
-   from the per-visit `<segment>.result.yaml` — useful when `rebootDelay`
-   is short enough that `updateSegment` comes back around far more often
-   than is worth re-syncing/re-checking-for-an-update/re-pushing a
-   report. A throttled visit still runs this segment's normal checks and
-   still advances/reboots per `rebootDelay` as usual — only this block is
-   skipped, recorded as its own `"wait"` check (`pass: true`) rather than
-   silently vanishing from the result. No `report` section, or a `report`
-   section with no `wait` subsection, means this block always runs,
-   unthrottled, exactly as before this existed.
 9. **Unless `active.yaml`'s `stopOn` equals the segment just tested**:
    write netplan for the *next* segment in the cycle, advance
-   `active.yaml`, sleep `config.yaml`'s `rebootDelay` (if set), and
-   reboot — on **every** segment, not just `updateSegment`, so there's
-   always a window to log in and inspect the box before it cycles away.
-   Paid once *per segment*, not once per full cycle — a full cycle's
-   wall-clock time grows by roughly (segment count × `rebootDelay`).
+   `active.yaml`, sleep, and reboot — on **every** segment, not just
+   `updateSegment`, so there's always a window to log in and inspect the
+   box before it cycles away. Paid once *per segment*, so a full cycle's
+   wall-clock time grows by roughly (segment count × delay).
+
+   The sleep itself (`effectiveDelay` in `cmd/mseg-tester`) is
+   `config.yaml`'s `rebootDelay` everywhere EXCEPT the report segment,
+   which instead sleeps `report.wait.waitDelay` if `report.wait.on`
+   names it (`internal/config.Wait`) — since nothing else throttles how
+   often step 8's config-sync/self-update/report actually runs anymore,
+   THIS delay is now the only thing keeping those infrequent: a short
+   `rebootDelay` on the report segment would mean that whole block comes
+   back around and re-runs every couple of minutes. `report.wait` is
+   entirely optional; a report segment with no `report.wait` (or no
+   `report` section at all) just uses the same plain `rebootDelay` as
+   every other segment, running step 8 on every visit at that pace — an
+   earlier design tried a SEPARATE elapsed-time throttle on top of this
+   delay and found the two fought each other (see git history around
+   `state.LastWait`/`updateSegmentThrottled` if curious); this delay
+   alone is simpler and was chosen instead.
 
    `stopOn` is optional and not something `config.yaml`/cloud-init ever
    sets — hand-edit it into `/mseg-tester/active.yaml` (e.g. over
@@ -300,7 +321,7 @@ at all.
 
 | Command | When it runs | What it does |
 |---|---|---|
-| `mseg-tester deploy` | Once, from the cloud-init bootstrap script, after the binary is first downloaded | Copies itself to `/usr/local/bin`, writes and enables the systemd unit (`internal/deploy`) |
+| `mseg-tester deploy` | Once, from the cloud-init bootstrap script, after the binary is first downloaded (and again after every self-update) | Copies itself to `/usr/local/bin`, writes and enables the systemd unit (`internal/deploy`) |
 | `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
 | `mseg-tester render-netplan -config path -segment name [-trunk-iface name]` | Whenever you want to eyeball a segment's netplan | Prints exactly what `internal/netplan.Write` would install for that segment, from a local `config.yaml` — no VM, no network, no shell-on-the-box needed. Handy when a box is stuck at boot (e.g. `systemd-networkd-wait-online`) and unreachable: run this locally against the same `config.yaml` instead |
 | `mseg-tester find-iface [-mac addr] [-pci-vendor id -pci-device id]` | On the guest, whenever you want to check what a `"wifi"` segment's `mac`/`pciVendor`+`pciDevice` (or auto-discovery, if none of the flags are given) would resolve to right now | Runs the same `internal/ifdiscover` resolution a `"wifi"` segment goes through at boot, and prints the resulting interface name (or the error you'd otherwise only see in a failed cycle's logs) — a fast way to sanity-check a MAC or PCI vendor/device pair against the guest's actual hardware before putting it in `config.yaml` |
@@ -337,14 +358,14 @@ handy since `config.yaml` may be fetched from a shared or even public
 
 | Field | Meaning |
 |---|---|
-| `rebootDelay` | Optional Go duration (e.g. `"2m"`) to wait, on EVERY segment, before rebooting into the next one — gives a window to log in and inspect the box (e.g. a slow/hung boot) before it cycles away. Paid once per segment, so a full cycle's wall-clock time grows by roughly (segment count × `rebootDelay`). Omit for immediate everywhere |
+| `rebootDelay` | Optional Go duration (e.g. `"2m"`) to wait, on every segment, before rebooting into the next one — gives a window to log in and inspect the box (e.g. a slow/hung boot) before it cycles away. Paid once per segment, so a full cycle's wall-clock time grows by roughly (segment count × `rebootDelay`). Omit for immediate everywhere. The report segment (`bootstrap.yaml`'s `updateSegment`) uses `report.wait.waitDelay` instead of this, if `report.wait.on` names it — see below |
 | `checkAttempts` | Optional. How many times to run the WHOLE batch of checks before giving up — if ANY check fails, the whole batch (not just that check) is re-run. Stops as soon as one full attempt passes every check. Defaults to `3` if omitted |
 | `checkRetryDelay` | Optional Go duration (e.g. `"10s"`) to wait before re-running the whole batch after a failure. Defaults to `"10s"` if omitted |
 | `timezone` | Optional IANA zone name (e.g. `"Europe/Berlin"`), applied via `timedatectl set-timezone` at the start of every run — idempotent, best-effort (an invalid zone is logged, never fatal). Lives in `config.yaml` rather than `bootstrap.yaml` since it's content that can change without re-provisioning the VM. Omit to leave the base image's timezone (normally UTC) untouched |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket`, typically written as `"${INFLUX_TOKEN}"` (see the `"${VAR}"` expansion note above) rather than a literal value — see `internal/report.PushInflux` and `examples/config.yaml` |
-| `report.wait.on` | Optional — the one segment (normally `bootstrap.yaml`'s `updateSegment`) that `report.wait.waitDelay` throttles. Lives under `report`, not its own top-level section, since config-sync/self-update/report are all the same updateSegment-only block and `wait` just throttles how often it runs. If omitted (no `report` section, or `report` with no `wait` subsection), config-sync/self-update/report run on every single visit to that segment, same as before this existed |
-| `report.wait.waitDelay` | Optional Go duration (e.g. `"10m"`), only meaningful alongside `report.wait.on`. The minimum time that must have elapsed since config-sync/self-update/report last actually ran before they're allowed to run again — segment checks and the reboot cycle itself are unaffected either way. Defaults to `"10m"` if `report.wait.on` is set but this is omitted. See `internal/config.Wait` and `internal/state.LastWait` |
+| `report.wait.on` | Optional — the one segment (normally `bootstrap.yaml`'s `updateSegment`) whose reboot-delay this replaces with `report.wait.waitDelay`. Lives under `report`, not its own top-level section, since config-sync/self-update/report are all the same updateSegment-only block and `wait` is fundamentally about that segment's timing. If omitted (no `report` section, or `report` with no `wait` subsection), that segment just uses the same plain `rebootDelay` as every other segment |
+| `report.wait.waitDelay` | Optional Go duration (e.g. `"10m"`), only meaningful alongside `report.wait.on`. How long `report.wait.on`'s segment sleeps before advancing/rebooting into the next segment, in place of `rebootDelay` — since config-sync/self-update/report run unconditionally on every visit to that segment (step 8 above), THIS delay is what keeps those infrequent, by making visits themselves infrequent. Segment checks themselves are unaffected either way — they still run on every visit, whatever the delay. Defaults to `"10m"` if `report.wait.on` is set but this is omitted. See `internal/config.Wait` and `effectiveDelay` in `cmd/mseg-tester` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag), `"vlan"` (a normal tagged sub-interface), or `"wifi"` (a dedicated Wi-Fi radio passed through to this VM, associating to `ssid`/`psk` instead of riding any VLAN at all). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether `net0` gets `trunks=` at all — the single source of truth for "which segment is native", and (via `Config.VLANSegmentNames`) which segments are VLANs at all, since a `"wifi"` segment's `name` isn't a VLAN ID and must never end up in `trunks=`. If any segment is `"native"`, `net0` is created with **no** `tag=`/`trunks=` whatsoever (see `internal/verifyvm.Params.net0`'s doc comment: on an OVS bridge, Proxmox's `tag=` for a genuinely-untagged VLAN misroutes it — confirmed live) — every VLAN reaches the guest untouched and `internal/netplan.Write` does the demuxing on the guest side. A `"wifi"` segment cycles through `active.yaml`/`rebootDelay`/reporting exactly like any other segment — reassociating over Wi-Fi doesn't need a reboot the way switching VLANs does, but testing it via the same cold-boot cycle as everything else is deliberate, not a limitation. Whichever interface (trunk NIC or Wi-Fi radio) ISN'T this segment's own gets an explicit `activation-mode: off` in the written netplan, not just left out of the file — a passed-through radio's kernel network device exists as soon as its driver binds, independent of netplan entirely, so merely not mentioning it doesn't actually keep it off (confirmed live: this broke `internal/ifaces.Find`'s interface-counting heuristic once passthrough Wi-Fi started working). See `internal/netplan.Render`'s `disableWifiIfaces` doc comment |
 | `segments[].ifname` | For `"native"`/`"vlan"`: optional, overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one). For `"wifi"`: optional — if set, used literally and takes priority over `mac`/`pciVendor`+`pciDevice`/auto-discovery below. There's no trunk-derived default for a standalone radio, so leave it unset unless you've confirmed the guest names it the same thing on every boot |

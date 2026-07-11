@@ -117,11 +117,12 @@ write_files:
 
       # report.url/report.influx are left unset here (no push configured
       # for this default static config) -- report exists at all purely to
-      # host wait below. Throttles config-sync/self-update/report (all
-      # only ever attempted on updateSegment) to run at most once per
-      # waitDelay, no matter how often the cycle happens to revisit "on"
-      # -- see internal/config.Wait. Segment checks and rebootDelay above
-      # are unaffected either way; this only gates that one block.
+      # host wait below. Replaces rebootDelay above with waitDelay, but
+      # only for segment "on" (updateSegment) -- config-sync/self-update/
+      # report (only ever attempted there) run unconditionally on every
+      # visit, so this delay is what keeps those infrequent, by making
+      # visits to "on" themselves infrequent -- see internal/config.Wait.
+      # Segment checks are unaffected either way.
       report:
         wait:
           on: "129"        # must match updateSegment above

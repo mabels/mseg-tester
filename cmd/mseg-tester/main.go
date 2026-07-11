@@ -30,47 +30,49 @@
 //	                        this tool wires itself into systemd lives here,
 //	                        not duplicated into a separate cloud-init template.
 //	mseg-tester run      -- what the systemd unit actually executes, once
-//	                        per boot:
-//	                          1. reads which segment is currently active,
-//	                          2. if this IS the update segment (the only
-//	                             one with a route anywhere outside the
-//	                             segment under test) AND config.Wait isn't
-//	                             currently throttling it (see step 6),
-//	                             refreshes config.yaml from the private
-//	                             repo (internal/configsync),
-//	                          3. applies config.Timezone via `timedatectl
-//	                             set-timezone` if set (see applyTimezone)
-//	                             -- best-effort, never fatal,
-//	                          4. checks the active segment (DHCP address
+//	                        per boot. One straight-line sequence, no
+//	                        branching state machine:
+//	                          1. figure out which segment is active --
+//	                             read active.yaml, or, if it doesn't exist
+//	                             (a genuinely fresh VM, or a state dir
+//	                             that's lost it), DETECT it from the live
+//	                             network instead of assuming any
+//	                             particular segment (see
+//	                             detectActiveSegment),
+//	                          2. decide whether this IS the report segment
+//	                             (active.Segment == boot.UpdateSegment --
+//	                             the only one with a route anywhere
+//	                             outside the segment under test),
+//	                          3. checks the active segment (DHCP address
 //	                             present, DNS answers, optionally a geo
 //	                             check, plain routing reachability -- see
 //	                             internal/checks), retrying the WHOLE batch
 //	                             up to config.CheckAttempts times if any
-//	                             single check in it failed,
-//	                          5. records the result,
-//	                          6. on the update segment, UNLESS config.Wait
-//	                             names this segment and its WaitDelay
-//	                             hasn't elapsed since this block last ran
-//	                             (state.LastWait -- recorded as a "wait"
-//	                             check instead when skipped): updates its
+//	                             single check in it failed, records the
+//	                             result,
+//	                          4. if this IS the report segment: updates its
 //	                             local git checkout (clone if missing, else
 //	                             fetch+reset --hard to softwareRef) and
 //	                             rebuilds+replaces its own executable only
 //	                             if that checkout's HEAD differs from the
 //	                             commit this binary was itself built from
 //	                             (internal/selfupdate), then POSTs every
-//	                             accumulated result to config.Report.URL if
-//	                             set (internal/report),
-//	                          7. unless active.yaml's StopOn equals the
+//	                             accumulated result to config.Report.URL/
+//	                             Influx if set (internal/report) -- every
+//	                             single visit, unconditionally: nothing
+//	                             throttles this separately from step 5's
+//	                             delay,
+//	                          5. unless active.yaml's StopOn equals the
 //	                             segment just tested (see
 //	                             state.Active.StopOn): writes netplan for
-//	                             the NEXT segment in the cycle, waits
-//	                             config.RebootDelay (every segment, not
-//	                             just the update one -- gives a login
-//	                             window before it cycles away), reboots.
-//	                             StopOn is hand-edited into active.yaml to
-//	                             park the cycle on one segment for
-//	                             sustained live debugging instead.
+//	                             the NEXT segment in the cycle, sleeps --
+//	                             config.RebootDelay normally, or
+//	                             config.Report.Wait.WaitDelay instead when
+//	                             this IS the segment config.Report.Wait
+//	                             names (see effectiveDelay) -- then
+//	                             reboots. StopOn is hand-edited into
+//	                             active.yaml to park the cycle on one
+//	                             segment for sustained live debugging.
 //
 //	-verbose logs each of the above steps, and every individual check's
 //	pass/fail/detail, as they happen -- handy when watching a live serial
@@ -108,6 +110,7 @@ import (
 	"github.com/mabels/mseg-tester/internal/configsync"
 	"github.com/mabels/mseg-tester/internal/deploy"
 	"github.com/mabels/mseg-tester/internal/envfile"
+	"github.com/mabels/mseg-tester/internal/ifaces"
 	"github.com/mabels/mseg-tester/internal/ifdiscover"
 	"github.com/mabels/mseg-tester/internal/netplan"
 	"github.com/mabels/mseg-tester/internal/report"
@@ -245,23 +248,6 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 			bootstrapPath, boot.TrunkInterface, boot.UpdateSegment, boot.SoftwareRepo)
 	}
 
-	active, err := state.LoadActive(boot.StateDir)
-	firstBoot := false
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("loading active state: %w", err)
-		}
-		// First boot: cloud-init brings the VM up on boot.UpdateSegment
-		// directly (see cloud-init/user-data.yaml) -- treat that as this
-		// run's segment until config.yaml is loaded below and the real
-		// cycle can be seeded.
-		firstBoot = true
-		active = state.Active{Segment: boot.UpdateSegment}
-	}
-	if verbose {
-		log.Printf("run: active segment=%s firstBoot=%v", active.Segment, firstBoot)
-	}
-
 	envVars, err := envfile.Load(boot.EnvFile)
 	if err != nil {
 		return fmt.Errorf("loading env file: %w", err)
@@ -270,35 +256,31 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		log.Printf("run: loaded %d var(s) from %s for \"${VAR}\" expansion in %s", len(envVars), boot.EnvFile, boot.ConfigLocalPath)
 	}
 
-	// Best-effort peek at whatever config.yaml is already on disk (from a
-	// previous sync, or the one cloud-init provisioned, or -- on a first
-	// boot relying purely on ConfigRepo with no static config.yaml at all
-	// -- nothing yet) purely to read Wait, which lives in config.yaml
-	// itself and so can't be known before config-sync without this. Any
-	// failure to load it here (missing file, still-malformed content)
-	// just means "can't tell yet, don't throttle" -- config-sync below
-	// still gets its normal chance to fetch/repair it; the REAL,
-	// authoritative load happens after config-sync, further down.
-	preThrottled := false
-	if precfg, perr := config.Load(boot.ConfigLocalPath, envVars); perr == nil {
-		var terr error
-		preThrottled, terr = updateSegmentThrottled(precfg, boot, active, verbose)
-		if terr != nil {
-			return terr
+	// Step 1: which segment is active right now.
+	active, err := state.LoadActive(boot.StateDir)
+	firstBoot := false
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("loading active state: %w", err)
 		}
+		firstBoot = true
 	}
 
-	// Config-sync (like self-update and reporting below) is only ever
-	// attempted from boot.UpdateSegment -- every other segment has no
-	// route to api.github.com. It's also entirely OPTIONAL: an empty
-	// boot.ConfigRepo means "just use the plain config.yaml cloud-init
-	// already wrote" (see bootstrap.Bootstrap.ConfigRepo's doc comment)
-	// -- the "make it easy first" path with no private repo or token at
-	// all. A failed sync (when ConfigRepo IS set) is not fatal: whatever
-	// config.yaml is already on disk (from a previous successful sync,
-	// or the one cloud-init provisioned) is left in place. Skipped
-	// entirely when preThrottled -- see config.Wait's doc comment.
-	if active.Segment == boot.UpdateSegment && boot.ConfigRepo != "" && !preThrottled {
+	// Config-sync is only ever attempted from boot.UpdateSegment (the
+	// only segment with a route anywhere outside itself) -- every other
+	// segment has no route to api.github.com. Also entirely OPTIONAL: an
+	// empty boot.ConfigRepo means "just use the plain config.yaml
+	// cloud-init already wrote" (see bootstrap.Bootstrap.ConfigRepo's doc
+	// comment). On firstBoot, active.yaml doesn't exist yet so
+	// active.Segment can't be compared against boot.UpdateSegment at
+	// all -- sync unconditionally instead, relying on the same invariant
+	// that makes step 1's fallback safe: cloud-init's own initial
+	// netplan always brings a fresh VM up on boot.UpdateSegment directly
+	// (see cloud-init/user-data.yaml), so "firstBoot" alone is as
+	// reliable a signal as knowing the segment explicitly would be. A
+	// failed sync (when ConfigRepo IS set) is never fatal: whatever
+	// config.yaml is already on disk is left in place either way.
+	if boot.ConfigRepo != "" && (firstBoot || active.Segment == boot.UpdateSegment) {
 		if verbose {
 			log.Printf("run: syncing config.yaml from %s", boot.ConfigRepo)
 		}
@@ -312,29 +294,38 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		return err
 	}
 
-	// The authoritative throttle check, against the just-(possibly-)
-	// synced config.yaml -- Wait itself might be exactly what a sync
-	// just changed, so this can disagree with preThrottled above; this
-	// is the value that actually gates self-update/report below.
-	throttled, err := updateSegmentThrottled(cfg, boot, active, verbose)
-	if err != nil {
-		return err
-	}
-
 	applyTimezone(cfg.Timezone, verbose)
 
 	if firstBoot {
-		names := cfg.CycleNames()
-		active = state.Active{Segment: names[0], Cycle: names}
+		// Rather than assuming the live segment must be
+		// boot.UpdateSegment (true for a genuinely fresh VM, but NOT
+		// necessarily true if active.yaml was instead lost partway
+		// through an already-cycling box's lifetime -- e.g. state dir
+		// wiped while parked on a later segment), detect it from the
+		// actual live network state. Falls back to boot.UpdateSegment,
+		// logged, only if detection itself fails outright (e.g. `ip a`
+		// couldn't even run) -- see detectActiveSegment.
+		detected, derr := detectActiveSegment(boot, cfg, verbose)
+		if derr != nil {
+			log.Printf("mseg-tester: detecting active segment from live network state: %v -- falling back to bootstrap.yaml's updateSegment %q", derr, boot.UpdateSegment)
+			detected = boot.UpdateSegment
+		}
+		active = state.Active{Segment: detected, Cycle: cfg.CycleNames()}
 		if err := state.SaveActive(boot.StateDir, active); err != nil {
 			return fmt.Errorf("seeding active state: %w", err)
 		}
+	}
+	if verbose {
+		log.Printf("run: active segment=%s firstBoot=%v", active.Segment, firstBoot)
 	}
 
 	seg, ok := cfg.BySegmentName(active.Segment)
 	if !ok {
 		return fmt.Errorf("active segment %q not declared in %s", active.Segment, boot.ConfigLocalPath)
 	}
+
+	// Step 2: am I the report segment?
+	isReportSegment := active.Segment == boot.UpdateSegment
 
 	// Best-effort: a content hash of the running binary, meaningful even
 	// though there's no semver tag baked in via -ldflags anymore (see
@@ -345,6 +336,7 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		log.Printf("mseg-tester: reading current version: %v", verErr)
 	}
 
+	// Step 3: run checks.
 	attempts, retryDelay := cfg.CheckAttemptsOrDefault(), cfg.CheckRetryDelayOrDefault()
 	if verbose {
 		log.Printf("run: checking segment %s (checkAttempts=%d checkRetryDelay=%s)", seg.Name, attempts, retryDelay)
@@ -356,22 +348,20 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		Version:   currentVersion,
 	}
 
-	if active.Segment == boot.UpdateSegment {
-		if throttled {
-			result.Checks = append(result.Checks, state.CheckResult{
-				Name: "wait", Pass: true,
-				Detail: fmt.Sprintf("waitDelay %s not yet elapsed since the last run -- skipping config-sync/self-update/report this visit", cfg.Report.Wait.WaitDelayOrDefault()),
-			})
-		} else {
-			applyUpdateCheck(boot, &result, verbose)
-		}
+	// Step 4: report segment -> report. Runs every single visit,
+	// unconditionally -- nothing throttles this separately from step 5's
+	// delay below (an earlier design tried a separate elapsed-time
+	// throttle here and it fought with the delay in confusing ways; the
+	// delay alone is what keeps visits here infrequent now).
+	if isReportSegment {
+		applyUpdateCheck(boot, &result, verbose)
 	}
 
 	if err := state.SaveResult(boot.StateDir, result); err != nil {
 		return fmt.Errorf("saving result: %w", err)
 	}
 
-	if active.Segment == boot.UpdateSegment && !throttled && cfg.Report != nil {
+	if isReportSegment && cfg.Report != nil {
 		if cfg.Report.URL != "" {
 			if verbose {
 				log.Printf("run: pushing accumulated results to %s", cfg.Report.URL)
@@ -391,17 +381,6 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		}
 	}
 
-	// Record that the throttled work just ran, so the NEXT visit to this
-	// segment knows when its waitDelay window started -- only when Wait
-	// actually applies here (nothing to track otherwise), and only on
-	// the branch that actually did the work (throttled visits must never
-	// reset the clock they're waiting on).
-	if active.Segment == boot.UpdateSegment && !throttled && cfg.Report != nil && cfg.Report.Wait != nil && cfg.Report.Wait.On == active.Segment {
-		if err := state.SaveLastWait(boot.StateDir, state.LastWait{Segment: active.Segment, Ran: time.Now().UTC()}); err != nil {
-			log.Printf("mseg-tester: saving last-wait state: %v", err)
-		}
-	}
-
 	// StopOn (state.Active.StopOn) parks the cycle here instead of
 	// advancing/rebooting -- this run's own checks/result/self-update/
 	// report above already happened as normal; only the step that would
@@ -409,7 +388,7 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	// doc comment for how this gets set (hand-edited into active.yaml
 	// while the cycle is already running) and why (sustained live
 	// debugging on one specific segment, e.g. over SSH/console, instead
-	// of only the brief RebootDelay window before it cycles away again).
+	// of only the brief delay window before it cycles away again).
 	if active.StopOn != "" && active.StopOn == active.Segment {
 		if verbose {
 			log.Printf("run: stopOn %q reached -- staying on segment %s, not advancing or rebooting", active.StopOn, active.Segment)
@@ -449,18 +428,25 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		return nil
 	}
 
-	// RebootDelay now applies on EVERY segment, not just updateSegment --
-	// deliberately changed from the original "updateSegment only" design
-	// (see config.Config.RebootDelay's doc comment) so there's a real
-	// window to SSH/console into the box and inspect it before it cycles
-	// away, on WHATEVER segment turns out to need debugging (e.g. a slow
-	// or hung boot on a non-update segment -- the whole reason this was
-	// changed). The cost: total per-cycle wall-clock time is now
-	// (segment count x RebootDelay), not paid just once -- pick a value
-	// that's fine to pay per segment, not just once per cycle.
-	if delay := cfg.RebootDelayDuration(); delay > 0 {
+	// Step 5: wait, then reboot. RebootDelay applies on EVERY segment,
+	// not just the report one -- deliberately changed from an earlier
+	// "updateSegment only" design (see config.Config.RebootDelay's doc
+	// comment) so there's a real window to SSH/console into the box and
+	// inspect it before it cycles away, on WHATEVER segment turns out to
+	// need debugging (e.g. a slow or hung boot on a non-report segment).
+	// The cost: total per-cycle wall-clock time is now (segment count x
+	// RebootDelay), not paid just once -- pick a value that's fine to
+	// pay per segment.
+	//
+	// The one exception: the report segment (isReportSegment, computed
+	// above from active.Segment == boot.UpdateSegment) uses
+	// config.Report.Wait.WaitDelay instead, when config.Report.Wait
+	// names it -- see effectiveDelay's doc comment for why that segment
+	// specifically needs a longer window than a login-sized pause.
+	delay := effectiveDelay(cfg, isReportSegment, active.Segment)
+	if delay > 0 {
 		if verbose {
-			log.Printf("run: sleeping %s before reboot (rebootDelay, every segment)", delay)
+			log.Printf("run: sleeping %s before reboot", delay)
 		}
 		time.Sleep(delay)
 	}
@@ -596,35 +582,97 @@ func applyTimezone(tz string, verbose bool) {
 	}
 }
 
-// updateSegmentThrottled reports whether cfg.Report.Wait applies to
-// active's segment and, if so, whether WaitDelay hasn't elapsed yet since
-// the last time the throttled work (config-sync/self-update/report)
-// actually ran there -- see config.Wait's doc comment. false whenever
-// Report or Report.Wait is nil, Wait doesn't name this segment, this
-// isn't boot.UpdateSegment, or the throttled work has never run here
-// before (state.LoadLastWait finds no marker) -- only a genuine I/O error
-// reading that marker (NOT "doesn't exist yet") is returned as an error.
-func updateSegmentThrottled(cfg config.Config, boot bootstrap.Bootstrap, active state.Active, verbose bool) (bool, error) {
-	if active.Segment != boot.UpdateSegment || cfg.Report == nil || cfg.Report.Wait == nil || cfg.Report.Wait.On != active.Segment {
-		return false, nil
+// effectiveDelay returns how long to sleep before advancing/rebooting
+// into the next segment: cfg.RebootDelayDuration() normally, but
+// cfg.Report.Wait.WaitDelayOrDefault() instead when isReportSegment is
+// true AND cfg.Report.Wait names segmentName. RebootDelay's brief window
+// exists so a human can glance at WHATEVER segment before it cycles
+// away; the report segment is different -- it's the one address
+// anything outside this cycle (config-sync's own source, a monitoring
+// ping) actually depends on staying reachable, and since nothing
+// separately throttles how often config-sync/self-update/report run
+// anymore (see run()'s step 4), THIS delay is now the only thing keeping
+// those infrequent: a short RebootDelay here would mean this segment --
+// and the work bundled with it -- comes back around every couple of
+// minutes.
+func effectiveDelay(cfg config.Config, isReportSegment bool, segmentName string) time.Duration {
+	if isReportSegment && cfg.Report != nil && cfg.Report.Wait != nil && cfg.Report.Wait.On == segmentName {
+		return cfg.Report.Wait.WaitDelayOrDefault()
 	}
-	lw, err := state.LoadLastWait(boot.StateDir, active.Segment)
+	return cfg.RebootDelayDuration()
+}
+
+// detectActiveSegment figures out which cfg.Segments entry the live
+// network is actually configured for right now, by comparing each
+// segment's expected interface (internal/netplan.IfaceName, resolving a
+// "wifi" segment's real interface first via resolveIfName) against
+// internal/ifaces.List()'s live `ip a` snapshot -- matching whichever
+// expected interface is UP and already carries a real (non-link-local)
+// address.
+//
+// Only ever called from run() when active.yaml doesn't exist. Rather
+// than assuming the live segment must be bootstrap.Bootstrap.UpdateSegment
+// (true for a genuinely fresh VM -- cloud-init's own initial netplan
+// brings it up directly on UpdateSegment, see cloud-init/user-data.yaml
+// -- but NOT necessarily true if active.yaml was instead lost partway
+// through an already-cycling box's lifetime, e.g. its state dir wiped
+// while parked on a later segment), this looks at what's actually live
+// and answers from there.
+//
+// Segments are checked in cfg.Segments' declared order, first match
+// wins. Known limitation: multiple "wifi" segments sharing the same
+// physical radio (this project's own wifi-128/130/131 -- see
+// config.Segment.PSK's doc comment) resolve to the SAME interface name,
+// so if the live radio happens to be associated to one of THOSE
+// segments' SSIDs, whichever is declared first in config.yaml wins here
+// regardless of which SSID it's actually on right now -- not
+// disambiguated by SSID. In practice this only matters if active.yaml is
+// lost while genuinely parked on a non-first wifi segment; the common
+// case (a truly fresh VM, or any "native"/"vlan" segment) is unambiguous.
+//
+// Returns an error (never fatal to the caller -- see run()'s fallback to
+// boot.UpdateSegment) if no segment's expected interface currently has a
+// usable address at all.
+func detectActiveSegment(boot bootstrap.Bootstrap, cfg config.Config, verbose bool) (string, error) {
+	list, err := ifaces.List()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+		return "", fmt.Errorf("listing live interfaces: %w", err)
+	}
+	return matchActiveSegment(list, boot, cfg, verbose)
+}
+
+// matchActiveSegment is detectActiveSegment's matching logic, split out
+// so tests can feed it a fabricated []ifaces.Iface directly instead of
+// needing to shell out to a real `ip a` -- see detectActiveSegment's doc
+// comment for the actual matching rules.
+func matchActiveSegment(list []ifaces.Iface, boot bootstrap.Bootstrap, cfg config.Config, verbose bool) (string, error) {
+	hasUsableAddr := func(name string) bool {
+		for _, f := range list {
+			if f.Name != name || !f.Up {
+				continue
+			}
+			for _, a := range f.Addrs {
+				if a.IP != nil && !a.IP.IsLinkLocalUnicast() {
+					return true
+				}
+			}
 		}
-		return false, fmt.Errorf("loading last-wait state for %s: %w", active.Segment, err)
+		return false
 	}
-	delay := cfg.Report.Wait.WaitDelayOrDefault()
-	elapsed := time.Since(lw.Ran)
-	if elapsed >= delay {
-		return false, nil
+	for _, seg := range cfg.Segments {
+		resolved, err := resolveIfName(seg)
+		if err != nil {
+			continue // e.g. an unresolvable wifi radio this boot -- can't be the live one
+		}
+		name := netplan.IfaceName(boot.TrunkInterface, resolved)
+		if hasUsableAddr(name) {
+			if verbose {
+				log.Printf("run: detected active segment %q from live interface %s", seg.Name, name)
+			}
+			return seg.Name, nil
+		}
 	}
-	if verbose {
-		log.Printf("run: waitDelay %s not yet elapsed since %s ran at %s (%s ago) -- throttling config-sync/self-update/report this visit",
-			delay, active.Segment, lw.Ran, elapsed.Round(time.Second))
-	}
-	return true, nil
+	return "", fmt.Errorf("no segment's expected interface has a usable address in the live `ip a` snapshot")
 }
 
 // applyUpdateCheck is only ever called when the active segment IS

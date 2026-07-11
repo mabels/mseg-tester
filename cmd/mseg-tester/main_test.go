@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/mabels/mseg-tester/internal/bootstrap"
 	"github.com/mabels/mseg-tester/internal/config"
+	"github.com/mabels/mseg-tester/internal/ifaces"
 	"github.com/mabels/mseg-tester/internal/state"
 )
 
@@ -120,110 +122,136 @@ func TestAdvanceToResolvableUnknownSegmentIsFatal(t *testing.T) {
 	}
 }
 
-func TestUpdateSegmentThrottledFalseWhenReportIsNil(t *testing.T) {
-	boot := testBootstrap(t)
-	cfg := config.Config{}
-	active := state.Active{Segment: boot.UpdateSegment}
-
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
-	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
+func TestEffectiveDelayUsesWaitDelayOnReportSegmentWhenWaitConfigured(t *testing.T) {
+	cfg := config.Config{
+		RebootDelay: "10s",
+		Report:      &config.Report{Wait: &config.Wait{On: "129", WaitDelay: "10m"}},
 	}
-	if throttled {
-		t.Error("expected false when Report (and therefore Report.Wait) is nil")
+	got := effectiveDelay(cfg, true /* isReportSegment */, "129")
+	if got != 10*time.Minute {
+		t.Errorf("effectiveDelay = %v, want waitDelay (10m)", got)
 	}
 }
 
-func TestUpdateSegmentThrottledFalseWhenReportWaitIsNil(t *testing.T) {
-	boot := testBootstrap(t)
-	cfg := config.Config{Report: &config.Report{URL: "https://example.com/report"}}
-	active := state.Active{Segment: boot.UpdateSegment}
-
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
-	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
+func TestEffectiveDelayUsesRebootDelayWhenNotReportSegment(t *testing.T) {
+	cfg := config.Config{
+		RebootDelay: "10s",
+		Report:      &config.Report{Wait: &config.Wait{On: "129", WaitDelay: "10m"}},
 	}
-	if throttled {
-		t.Error("expected false when Report is set but Report.Wait is nil")
+	got := effectiveDelay(cfg, false /* isReportSegment */, "128")
+	if got != 10*time.Second {
+		t.Errorf("effectiveDelay = %v, want plain rebootDelay (10s) on a non-report segment", got)
 	}
 }
 
-func TestUpdateSegmentThrottledFalseWhenNotUpdateSegment(t *testing.T) {
-	boot := testBootstrap(t)
-	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
-	active := state.Active{Segment: "128"} // not boot.UpdateSegment
-
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
-	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
-	}
-	if throttled {
-		t.Error("expected false when the active segment isn't boot.UpdateSegment")
+func TestEffectiveDelayUsesRebootDelayWhenWaitIsNil(t *testing.T) {
+	cfg := config.Config{RebootDelay: "10s", Report: &config.Report{URL: "https://example.com"}}
+	got := effectiveDelay(cfg, true, "129")
+	if got != 10*time.Second {
+		t.Errorf("effectiveDelay = %v, want plain rebootDelay when Report.Wait is nil", got)
 	}
 }
 
-func TestUpdateSegmentThrottledFalseWhenWaitOnNamesADifferentSegment(t *testing.T) {
-	boot := testBootstrap(t)
-	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: "130", WaitDelay: "10m"}}} // not boot.UpdateSegment ("129")
-	active := state.Active{Segment: boot.UpdateSegment}
-
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
-	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
+func TestEffectiveDelayUsesRebootDelayWhenWaitOnNamesADifferentSegment(t *testing.T) {
+	cfg := config.Config{
+		RebootDelay: "10s",
+		Report:      &config.Report{Wait: &config.Wait{On: "130", WaitDelay: "10m"}}, // not "129"
 	}
-	if throttled {
-		t.Error("expected false when Wait.On names a different segment")
+	got := effectiveDelay(cfg, true, "129")
+	if got != 10*time.Second {
+		t.Errorf("effectiveDelay = %v, want plain rebootDelay when Wait.On doesn't match this segment", got)
 	}
 }
 
-func TestUpdateSegmentThrottledFalseWhenNoPriorLastWait(t *testing.T) {
-	boot := testBootstrap(t)
-	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
-	active := state.Active{Segment: boot.UpdateSegment}
-
-	// No state.SaveLastWait call at all -- first time this segment's
-	// throttled work would ever run.
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
-	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
-	}
-	if throttled {
-		t.Error("expected false when the throttled work has never run on this segment before")
+func TestEffectiveDelayUsesRebootDelayWhenReportIsNil(t *testing.T) {
+	cfg := config.Config{RebootDelay: "10s"}
+	got := effectiveDelay(cfg, true, "129")
+	if got != 10*time.Second {
+		t.Errorf("effectiveDelay = %v, want plain rebootDelay when Report isn't configured at all", got)
 	}
 }
 
-func TestUpdateSegmentThrottledTrueWithinWaitDelay(t *testing.T) {
+func TestMatchActiveSegmentFindsNativeSegmentWithAddress(t *testing.T) {
 	boot := testBootstrap(t)
-	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
-	active := state.Active{Segment: boot.UpdateSegment}
-
-	if err := state.SaveLastWait(boot.StateDir, state.LastWait{Segment: boot.UpdateSegment, Ran: time.Now().Add(-1 * time.Minute)}); err != nil {
-		t.Fatalf("SaveLastWait: %v", err)
+	boot.TrunkInterface = "ens18"
+	cfg := config.Config{Segments: []config.Segment{
+		{Name: "128", Type: "native"},
+		{Name: "129", Type: "vlan"},
+	}}
+	list := []ifaces.Iface{
+		{Name: "ens18", Up: true, Addrs: []ifaces.Addr{{IP: mustParseIP(t, "192.168.128.5")}}},
 	}
-
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	got, err := matchActiveSegment(list, boot, cfg, false)
 	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
+		t.Fatalf("matchActiveSegment: %v", err)
 	}
-	if !throttled {
-		t.Error("expected true when less than waitDelay has elapsed since the last run")
+	if got != "128" {
+		t.Errorf("matchActiveSegment = %q, want \"128\" (the native segment riding the bare trunk)", got)
 	}
 }
 
-func TestUpdateSegmentThrottledFalseAfterWaitDelayElapses(t *testing.T) {
+func TestMatchActiveSegmentFindsTaggedVLANSegmentWithAddress(t *testing.T) {
 	boot := testBootstrap(t)
-	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
-	active := state.Active{Segment: boot.UpdateSegment}
-
-	if err := state.SaveLastWait(boot.StateDir, state.LastWait{Segment: boot.UpdateSegment, Ran: time.Now().Add(-11 * time.Minute)}); err != nil {
-		t.Fatalf("SaveLastWait: %v", err)
+	boot.TrunkInterface = "ens18"
+	cfg := config.Config{Segments: []config.Segment{
+		{Name: "128", Type: "native"},
+		{Name: "129", Type: "vlan"},
+	}}
+	list := []ifaces.Iface{
+		{Name: "ens18", Up: true}, // bare trunk, no address -- optional: true, as netplan.Render writes it
+		{Name: "ens18.129", Parent: "ens18", Up: true, Addrs: []ifaces.Addr{{IP: mustParseIP(t, "192.168.129.56")}}},
 	}
-
-	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	got, err := matchActiveSegment(list, boot, cfg, false)
 	if err != nil {
-		t.Fatalf("updateSegmentThrottled: %v", err)
+		t.Fatalf("matchActiveSegment: %v", err)
 	}
-	if throttled {
-		t.Error("expected false once waitDelay has elapsed since the last run")
+	if got != "129" {
+		t.Errorf("matchActiveSegment = %q, want \"129\"", got)
 	}
+}
+
+func TestMatchActiveSegmentIgnoresDownInterfaces(t *testing.T) {
+	boot := testBootstrap(t)
+	boot.TrunkInterface = "ens18"
+	cfg := config.Config{Segments: []config.Segment{{Name: "128", Type: "native"}}}
+	list := []ifaces.Iface{
+		{Name: "ens18", Up: false, Addrs: []ifaces.Addr{{IP: mustParseIP(t, "192.168.128.5")}}},
+	}
+	if _, err := matchActiveSegment(list, boot, cfg, false); err == nil {
+		t.Error("expected an error -- the only matching interface isn't UP")
+	}
+}
+
+func TestMatchActiveSegmentIgnoresLinkLocalOnlyAddresses(t *testing.T) {
+	boot := testBootstrap(t)
+	boot.TrunkInterface = "ens18"
+	cfg := config.Config{Segments: []config.Segment{{Name: "128", Type: "native"}}}
+	list := []ifaces.Iface{
+		{Name: "ens18", Up: true, Addrs: []ifaces.Addr{{IP: mustParseIP(t, "fe80::1")}}},
+	}
+	if _, err := matchActiveSegment(list, boot, cfg, false); err == nil {
+		t.Error("expected an error -- a link-local-only address isn't a real, routable one")
+	}
+}
+
+func TestMatchActiveSegmentErrorsWhenNothingMatches(t *testing.T) {
+	boot := testBootstrap(t)
+	boot.TrunkInterface = "ens18"
+	cfg := config.Config{Segments: []config.Segment{
+		{Name: "128", Type: "native"},
+		{Name: "129", Type: "vlan"},
+	}}
+	list := []ifaces.Iface{{Name: "lo", Up: true}}
+	if _, err := matchActiveSegment(list, boot, cfg, false); err == nil {
+		t.Error("expected an error when no segment's expected interface has a usable address")
+	}
+}
+
+func mustParseIP(t *testing.T, s string) net.IP {
+	t.Helper()
+	ip := net.ParseIP(s)
+	if ip == nil {
+		t.Fatalf("net.ParseIP(%q) failed", s)
+	}
+	return ip
 }

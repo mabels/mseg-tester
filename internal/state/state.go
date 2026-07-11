@@ -89,26 +89,10 @@ func (r Result) Pass() bool {
 	return true
 }
 
-// LastWait records the last time config.Wait's throttled work
-// (config-sync/self-update/report) actually ran on its target segment --
-// kept as its own small file rather than reusing <segment>.result.yaml's
-// Timestamp, because that file is overwritten on EVERY visit to a
-// segment (throttled or not), so it can't answer "when did the throttled
-// work last actually run" once a visit that skipped it comes along and
-// overwrites it with a newer, non-representative timestamp.
-type LastWait struct {
-	Segment string    `yaml:"segment"`
-	Ran     time.Time `yaml:"ran"`
-}
-
 func activePath(stateDir string) string { return filepath.Join(stateDir, "active.yaml") }
 
 func resultPath(stateDir, segment string) string {
 	return filepath.Join(stateDir, segment+".result.yaml")
-}
-
-func lastWaitPath(stateDir, segment string) string {
-	return filepath.Join(stateDir, segment+".lastwait.yaml")
 }
 
 // LoadActive reads active.yaml. Callers decide what a missing file means
@@ -172,30 +156,6 @@ func LoadAllResults(stateDir string) ([]Result, error) {
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Segment < results[j].Segment })
 	return results, nil
-}
-
-// LoadLastWait reads <segment>.lastwait.yaml -- callers decide what a
-// missing file means (the throttled work has never run on this segment
-// yet vs. a real error), same convention as LoadActive.
-func LoadLastWait(stateDir, segment string) (LastWait, error) {
-	var lw LastWait
-	b, err := os.ReadFile(lastWaitPath(stateDir, segment))
-	if err != nil {
-		return lw, err
-	}
-	if err := yaml.Unmarshal(b, &lw); err != nil {
-		return lw, fmt.Errorf("state: parsing %s: %w", lastWaitPath(stateDir, segment), err)
-	}
-	return lw, nil
-}
-
-// SaveLastWait writes <segment>.lastwait.yaml atomically.
-func SaveLastWait(stateDir string, lw LastWait) error {
-	b, err := yaml.Marshal(lw)
-	if err != nil {
-		return fmt.Errorf("state: marshaling lastwait for %s: %w", lw.Segment, err)
-	}
-	return writeAtomic(lastWaitPath(stateDir, lw.Segment), b)
 }
 
 func writeAtomic(path string, b []byte) error {
