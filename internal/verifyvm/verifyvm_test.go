@@ -112,7 +112,7 @@ func TestRenderUserDataWithoutEnvFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderUserData: %v", err)
 	}
-	if strings.Contains(string(out), "- path: /etc/mseg-tester/.env") {
+	if strings.Contains(string(out), "- path: /mseg-tester/.env") {
 		t.Errorf("expected no .env write_files entry when EnvFile is empty, got:\n%s", out)
 	}
 	assertValidYAML(t, out)
@@ -128,7 +128,7 @@ func TestRenderUserDataWithEnvFile(t *testing.T) {
 		t.Fatalf("RenderUserData: %v", err)
 	}
 	s := string(out)
-	if !strings.Contains(s, "- path: /etc/mseg-tester/.env") {
+	if !strings.Contains(s, "- path: /mseg-tester/.env") {
 		t.Errorf("expected a .env write_files entry, got:\n%s", s)
 	}
 	if !strings.Contains(s, `permissions: "0600"`) {

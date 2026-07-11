@@ -1,6 +1,8 @@
 package netplan
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -286,5 +288,92 @@ func assertValidNetplanYAML(t *testing.T, doc string) {
 	var out map[string]any
 	if err := yaml.Unmarshal([]byte(doc), &out); err != nil {
 		t.Fatalf("rendered netplan is not valid YAML: %v\n%s", err, doc)
+	}
+}
+
+// withTempNetplanPath points package-level path at a file under t.TempDir()
+// for the duration of the calling test, restoring the real path afterward
+// -- Write must never touch the real /etc/netplan/90-mseg-tester.yaml
+// during tests.
+func withTempNetplanPath(t *testing.T) {
+	t.Helper()
+	real := path
+	path = filepath.Join(t.TempDir(), "90-mseg-tester.yaml")
+	t.Cleanup(func() { path = real })
+}
+
+func TestWriteCreatesPerSegmentFileAndHardLinksPath(t *testing.T) {
+	withTempNetplanPath(t)
+	seg := config.Segment{Name: "129", Type: "vlan"}
+
+	if err := Write("ens18", seg, nil); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	segContent, err := os.ReadFile(segPath(seg))
+	if err != nil {
+		t.Fatalf("expected %s to exist: %v", segPath(seg), err)
+	}
+	pathContent, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
+	}
+	if string(segContent) != string(pathContent) {
+		t.Fatalf("path and segPath content differ:\npath:    %s\nsegPath: %s", pathContent, segContent)
+	}
+
+	segInfo, err := os.Stat(segPath(seg))
+	if err != nil {
+		t.Fatalf("Stat segPath: %v", err)
+	}
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat path: %v", err)
+	}
+	if !os.SameFile(segInfo, pathInfo) {
+		t.Errorf("expected path to be a hard link to segPath (same inode), got two distinct files")
+	}
+}
+
+func TestWriteKeepsPriorSegmentFilesAndRepointsPath(t *testing.T) {
+	withTempNetplanPath(t)
+	seg128 := config.Segment{Name: "128", Type: "native"}
+	seg129 := config.Segment{Name: "129", Type: "vlan"}
+
+	if err := Write("ens18", seg128, nil); err != nil {
+		t.Fatalf("Write(128): %v", err)
+	}
+	if err := Write("ens18", seg129, nil); err != nil {
+		t.Fatalf("Write(129): %v", err)
+	}
+
+	// 128's own debug file must still exist, untouched by 129's Write --
+	// this is the whole point of the feature: inspecting what a segment
+	// last rendered even after the cycle has moved past it.
+	if _, err := os.Stat(segPath(seg128)); err != nil {
+		t.Fatalf("expected %s to still exist after writing a different segment: %v", segPath(seg128), err)
+	}
+
+	// path must now point at 129's file, not 128's.
+	pathInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat path: %v", err)
+	}
+	seg129Info, err := os.Stat(segPath(seg129))
+	if err != nil {
+		t.Fatalf("Stat segPath(129): %v", err)
+	}
+	if !os.SameFile(pathInfo, seg129Info) {
+		t.Errorf("expected path to now be a hard link to segPath(129), not segPath(128)")
+	}
+}
+
+func TestSegPathDoesNotEndInYAMLExtension(t *testing.T) {
+	// Deliberate: netplan's own "/etc/netplan/*.yaml" glob must never
+	// pick up these per-segment debug files as live config -- see
+	// Write's doc comment.
+	got := segPath(config.Segment{Name: "130"})
+	if strings.HasSuffix(got, ".yaml") {
+		t.Errorf("segPath() = %q, must NOT end in \".yaml\" or netplan would treat it as live config", got)
 	}
 }

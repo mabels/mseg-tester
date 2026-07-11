@@ -117,7 +117,7 @@ type Params struct {
 	ConfigYAML string
 	// EnvFile is OPTIONAL -- the raw content of a local ".env" file
 	// (KEY=VALUE, see internal/envfile) to write directly to
-	// /etc/mseg-tester/.env at deploy time, 0600. This lets the deployed
+	// /mseg-tester/.env at deploy time, 0600. This lets the deployed
 	// VM's own `mseg-tester run` re-resolve ConfigYAML's "${VAR}"
 	// references at runtime too (belt and suspenders alongside the
 	// create-time substitution above -- matters for -config-repo, which

@@ -109,9 +109,10 @@ func TestCheckAndApplyBuildFailureIsAnError(t *testing.T) {
 }
 
 func TestCurrentVersionIsShortAndStable(t *testing.T) {
-	// CheckAndApply's own logic is exercised above via checkAndApply;
-	// CurrentVersion itself just calls os.Executable(), so this only
-	// confirms the trivial hashing contract on a controlled file.
+	// CheckAndApply's own byte-identical-replace logic is exercised above
+	// via checkAndApply and still relies on fileSHA256 -- unrelated to
+	// CurrentVersion/BuildInfo below (build-info-derived, not content
+	// hashing), just confirming that helper's own contract here.
 	self := writeSelf(t, []byte("hello"))
 	h, err := fileSHA256(self)
 	if err != nil {
@@ -119,5 +120,27 @@ func TestCurrentVersionIsShortAndStable(t *testing.T) {
 	}
 	if len(h) < 12 {
 		t.Fatalf("hash too short to slice to 12: %q", h)
+	}
+}
+
+func TestBuildInfoNeverPanicsAndReturnsAVersion(t *testing.T) {
+	// Running inside `go test`, this reads the TEST binary's own build
+	// info, not a real mseg-tester build -- can't assert an exact commit
+	// here, just that reading it degrades gracefully (never panics,
+	// Version is never empty -- "(unknown)" is the deliberate fallback)
+	// the same way it would for module-mode build lacking VCS info.
+	b := BuildInfo()
+	if b.Version == "" {
+		t.Errorf("BuildInfo().Version should never be empty, got %q", b.Version)
+	}
+}
+
+func TestCurrentVersionMatchesBuildInfoVersion(t *testing.T) {
+	v, err := CurrentVersion()
+	if err != nil {
+		t.Fatalf("CurrentVersion: %v", err)
+	}
+	if v != BuildInfo().Version {
+		t.Errorf("CurrentVersion() = %q, want it to match BuildInfo().Version = %q", v, BuildInfo().Version)
 	}
 }

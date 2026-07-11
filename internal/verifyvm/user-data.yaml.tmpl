@@ -97,8 +97,10 @@ write_files:
   # optional: empty means "just use the plain config.yaml below," set
   # means "fetch/refresh config.yaml from that private repo at runtime"
   # (internal/configsync) -- see -config-file vs. -config-repo in
-  # cmd/verify-mseg-tester.
-  - path: /etc/mseg-tester/bootstrap.yaml
+  # cmd/verify-mseg-tester. Lives under /mseg-tester, not /etc -- see
+  # internal/bootstrap's package doc for why everything this tool
+  # touches lives in one directory now.
+  - path: /mseg-tester/bootstrap.yaml
     permissions: "0600"
     content: |
       trunkInterface: {{.TrunkIface}}
@@ -130,7 +132,7 @@ write_files:
   # runtime, without that secret ever appearing in config.yaml itself.
   # 0600, never fetched from configRepo, never synced anywhere -- see
   # bootstrap.Bootstrap.EnvFile.
-  - path: /etc/mseg-tester/.env
+  - path: /mseg-tester/.env
     permissions: "0600"
     content: |
 {{indent .EnvFile "      "}}
@@ -172,7 +174,7 @@ write_files:
         rm -f /tmp/go.tar.gz
       fi
 
-      bootstrap_yaml="/etc/mseg-tester/bootstrap.yaml"
+      bootstrap_yaml="/mseg-tester/bootstrap.yaml"
       software_repo=$(sed -n 's/^softwareRepo: *"\(.*\)"/\1/p' "$bootstrap_yaml")
       software_ref=$(sed -n 's/^softwareRef: *"\(.*\)"/\1/p' "$bootstrap_yaml")
       [ -n "$software_ref" ] || software_ref="latest"

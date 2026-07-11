@@ -2,6 +2,12 @@
 // per boot on a small, otherwise-unremarkable Ubuntu Server VM whose one
 // NIC is trunked with every segment's VLAN tag. Subcommands:
 //
+//	mseg-tester version -- prints the same commit-identifying version
+//	                        string recorded into every state.Result (see
+//	                        selfupdate.BuildInfo) -- "which commit is
+//	                        this actually running" for whoever just
+//	                        SSHed/console'd into a box. "-version"/
+//	                        "--version" both work too.
 //	mseg-tester render-netplan -- offline debug helper: prints exactly what
 //	                        internal/netplan.Write would install for one
 //	                        segment, from a local config.yaml, no VM or
@@ -65,13 +71,17 @@
 // Two configuration files, split by how often each changes -- see the
 // package docs on internal/bootstrap and internal/config for why:
 //
-//	/etc/mseg-tester/bootstrap.yaml -- local, rare, written once by
-//	                                   cloud-init (trunk NIC, update
-//	                                   segment, where the two repos are).
-//	/mseg-tester/config.yaml        -- content, frequent, fetched from
-//	                                   the private repo named in
-//	                                   bootstrap.yaml (segment list, test
-//	                                   targets, timing, reporting).
+//	/mseg-tester/bootstrap.yaml -- local, rare, written once by cloud-init
+//	                               (trunk NIC, update segment, where the
+//	                               two repos are).
+//	/mseg-tester/config.yaml    -- content, frequent, fetched from the
+//	                               private repo named in bootstrap.yaml
+//	                               (segment list, test targets, timing,
+//	                               reporting). Both files live in the same
+//	                               directory as active.yaml/*.result.yaml
+//	                               -- one place for everything this tool
+//	                               ever touches on a VM, nothing under
+//	                               /etc at all.
 package main
 
 import (
@@ -98,7 +108,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatalf("mseg-tester: expected a subcommand: \"deploy\", \"run\", \"render-netplan\", or \"find-iface\"")
+		log.Fatalf("mseg-tester: expected a subcommand: \"deploy\", \"run\", \"render-netplan\", \"find-iface\", or \"version\"")
 	}
 	subcommand := os.Args[1]
 	args := os.Args[2:]
@@ -114,8 +124,33 @@ func main() {
 		renderNetplanCmd(args)
 	case "find-iface":
 		findIfaceCmd(args)
+	// "-version"/"--version" accepted too -- the conventional flag form,
+	// for anyone who reaches for it out of habit before checking
+	// -h/--help.
+	case "version", "-version", "--version":
+		versionCmd()
 	default:
-		log.Fatalf("mseg-tester: unknown subcommand %q -- expected \"deploy\", \"run\", \"render-netplan\", or \"find-iface\"", subcommand)
+		log.Fatalf("mseg-tester: unknown subcommand %q -- expected \"deploy\", \"run\", \"render-netplan\", \"find-iface\", or \"version\"", subcommand)
+	}
+}
+
+// versionCmd prints exactly what state.Result.Version records for this
+// same running executable -- see selfupdate.BuildInfo's doc comment for
+// what each field means and when it's available. The single most
+// useful thing to check on a VM you've just SSHed into: "which commit
+// is this actually running right now".
+func versionCmd() {
+	b := selfupdate.BuildInfo()
+	fmt.Println("mseg-tester", b.Version)
+	if b.Revision != "" {
+		dirty := ""
+		if b.Modified {
+			dirty = " (dirty)"
+		}
+		fmt.Printf("commit %s%s\n", b.Revision, dirty)
+	}
+	if b.Time != "" {
+		fmt.Println("committed", b.Time)
 	}
 }
 
@@ -181,7 +216,7 @@ func findIfaceCmd(args []string) {
 
 func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	bootstrapPath := fs.String("bootstrap", "/etc/mseg-tester/bootstrap.yaml", "path to bootstrap.yaml")
+	bootstrapPath := fs.String("bootstrap", "/mseg-tester/bootstrap.yaml", "path to bootstrap.yaml")
 	noReboot := fs.Bool("no-reboot", false, "run one pass and print the result instead of rebooting (manual testing)")
 	verbose := fs.Bool("verbose", false, "log every step and every check's pass/fail/detail as it happens, not just the final summary -- handy when watching a live console")
 	_ = fs.Parse(args)
@@ -327,26 +362,15 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		return nil
 	}
 
-	next := active.Next()
-	nextSeg, ok := cfg.BySegmentName(next)
-	if !ok {
-		return fmt.Errorf("next segment %q not declared in %s", next, boot.ConfigLocalPath)
-	}
-	// A "wifi" segment's IfName may be empty (see config.Segment.IfName's
-	// doc comment -- "auto", or identified by MAC/PCI instead of a
-	// literal name): resolve it to a concrete interface name NOW, once,
-	// so both netplan.Write below and internal/checks' own discoverIface
-	// (next boot, once this segment becomes active) see a plain literal
-	// name either way -- resolveIfName is a no-op for "native"/"vlan"
-	// segments and for any "wifi" segment that already has IfName set.
-	// Unlike checks' resolution (which reuses its own per-attempt retry
-	// loop), a failure here is NOT retried -- this runs once, right
-	// before writing netplan, and a passthrough card's driver binding at
-	// kernel boot (well before this service starts) is expected to have
-	// already happened by now.
-	nextSeg, err = resolveIfName(nextSeg)
+	// advanceToResolvable walks forward from the active segment, skipping
+	// any segment whose interface can't be resolved right now (e.g. a
+	// "wifi" segment whose PCI-passthrough radio failed to probe THIS
+	// boot -- confirmed live: mt7921e "probe ... failed with error -5"
+	// leaves no net/ device bound at all, not just "still loading") --
+	// see its own doc comment for why this is a skip, not fatal.
+	next, nextSeg, err := advanceToResolvable(cfg, boot, active, verbose)
 	if err != nil {
-		return fmt.Errorf("resolving interface for next segment %s: %w", next, err)
+		return err
 	}
 	disableWifiIfaces := wifiIfacesToDisable(nextSeg)
 	if verbose {
@@ -415,6 +439,54 @@ func resolveIfName(seg config.Segment) (config.Segment, error) {
 	}
 	seg.IfName = resolved
 	return seg, nil
+}
+
+// advanceToResolvable walks forward from active through cfg's cycle,
+// looking for the next segment whose interface can actually be resolved
+// right now (resolveIfName -- a no-op for "native"/"vlan", but for
+// "wifi" requires the passed-through radio's kernel netdev to genuinely
+// exist, which can fail if PCI passthrough or the driver itself failed
+// THIS particular boot).
+//
+// A segment that fails to resolve is SKIPPED, not fatal: a dead/missing
+// wifi radio shouldn't wedge the entire reboot cycle forever on the
+// segment before it (confirmed live -- resolveIfName returning an error
+// used to propagate straight out of run(), main() would log.Fatalf, and
+// with no systemd Restart= path forcing a reboot, the box just sat on
+// its current segment permanently instead of cycling around a broken
+// radio). Each skipped segment still gets its own failed
+// <segment>.result.yaml recorded (a single "interface" check) so the
+// failure stays visible in reports/Grafana instead of silently
+// vanishing, even though this run never actually boots into it to run
+// its normal DNS/routing checks.
+//
+// Bounded to one full lap of the cycle: if EVERY segment fails to
+// resolve (e.g. a config that's all "wifi" segments on one dead radio,
+// no wired segment at all), that's a real, fatal condition worth
+// surfacing loudly rather than spinning through reboots forever.
+func advanceToResolvable(cfg config.Config, boot bootstrap.Bootstrap, active state.Active, verbose bool) (string, config.Segment, error) {
+	cursor := active
+	for i := 0; i < len(active.Cycle); i++ {
+		candidate := cursor.Next()
+		seg, ok := cfg.BySegmentName(candidate)
+		if !ok {
+			return "", config.Segment{}, fmt.Errorf("next segment %q not declared in %s", candidate, boot.ConfigLocalPath)
+		}
+		resolved, err := resolveIfName(seg)
+		if err == nil {
+			return candidate, resolved, nil
+		}
+		log.Printf("mseg-tester: skipping segment %s: resolving interface: %v", candidate, err)
+		if saveErr := state.SaveResult(boot.StateDir, state.Result{
+			Segment:   candidate,
+			Timestamp: time.Now().UTC(),
+			Checks:    []state.CheckResult{{Name: "interface", Pass: false, Detail: err.Error()}},
+		}); saveErr != nil {
+			log.Printf("mseg-tester: recording skipped segment %s: %v", candidate, saveErr)
+		}
+		cursor = state.Active{Segment: candidate, Cycle: active.Cycle}
+	}
+	return "", config.Segment{}, fmt.Errorf("no segment in cycle %v could be resolved -- every interface failed (wifi hardware down?)", active.Cycle)
 }
 
 // wifiIfacesToDisable returns every Wi-Fi-capable interface on this

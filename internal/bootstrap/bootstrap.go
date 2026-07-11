@@ -1,4 +1,4 @@
-// Package bootstrap reads /etc/mseg-tester/bootstrap.yaml -- the small,
+// Package bootstrap reads /mseg-tester/bootstrap.yaml -- the small,
 // rarely-changing set of facts that have to be known BEFORE any config
 // can be fetched from anywhere: which local NIC is the VLAN trunk, which
 // segment can actually reach the internet, and where the two GitHub repos
@@ -10,6 +10,14 @@
 // this file. bootstrap.yaml is written once by cloud-init and is the one
 // thing that can't itself live in a repo this tool fetches -- it's what
 // tells the tool where to look.
+//
+// Lives under /mseg-tester (not /etc/mseg-tester, where it used to live)
+// -- one directory holds everything this tool ever touches on a VM
+// (bootstrap.yaml, .env, config.yaml, active.yaml, results), nothing
+// under /etc at all, deliberately: two directories to remember (and back
+// up, and inspect) for what's genuinely one small set of local state was
+// never worth it, since nothing here actually depended on FHS's
+// static-vs-variable distinction in practice.
 package bootstrap
 
 import (
@@ -19,7 +27,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Bootstrap is the whole of /etc/mseg-tester/bootstrap.yaml.
+// Bootstrap is the whole of /mseg-tester/bootstrap.yaml.
 type Bootstrap struct {
 	// TrunkInterface is the guest NIC carrying every segment's VLAN tag.
 	TrunkInterface string `yaml:"trunkInterface"`
@@ -76,13 +84,14 @@ type Bootstrap struct {
 	// active.yaml/*.result.yaml rather than under /etc -- this is the one
 	// file on the box that changes every time a segment cycles back
 	// around (self-update/config-sync/report all touch state here on
-	// UpdateSegment), so it lives with the rest of the mutable state, not
-	// with bootstrap.yaml's genuinely-static facts.
+	// UpdateSegment) -- this and bootstrap.yaml now share one directory
+	// (/mseg-tester) on disk, but remain conceptually distinct: this
+	// changes constantly, bootstrap.yaml essentially never does.
 	ConfigLocalPath string `yaml:"configLocalPath"`
 	// EnvFile is OPTIONAL -- path to a simple "KEY=VALUE" .env file
 	// (internal/envfile) used to expand "${VAR}" references anywhere in
 	// config.yaml's text (e.g. report.influx.token) before it's parsed.
-	// Defaults to "/etc/mseg-tester/.env" if empty. Written once by
+	// Defaults to "/mseg-tester/.env" if empty. Written once by
 	// cloud-init, 0600, and -- like bootstrap.yaml itself -- NEVER synced
 	// via ConfigRepo: this is the one place actual secrets live on disk,
 	// kept separate from config.yaml, which may be shared or even public.
@@ -92,7 +101,7 @@ type Bootstrap struct {
 	EnvFile string `yaml:"envFile,omitempty"`
 }
 
-const defaultPath = "/etc/mseg-tester/bootstrap.yaml"
+const defaultPath = "/mseg-tester/bootstrap.yaml"
 
 func Load(path string) (Bootstrap, error) {
 	if path == "" {
@@ -116,7 +125,7 @@ func Load(path string) (Bootstrap, error) {
 		b.SoftwareRef = "latest"
 	}
 	if b.EnvFile == "" {
-		b.EnvFile = "/etc/mseg-tester/.env"
+		b.EnvFile = "/mseg-tester/.env"
 	}
 	// ConfigRepo is deliberately NOT required here -- see its doc comment
 	// above: empty means "use the plain config.yaml cloud-init already

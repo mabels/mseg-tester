@@ -103,7 +103,7 @@ report:
   #
   # "${INFLUX_TOKEN}" here is NOT a literal value -- it's expanded at
   # load time (internal/envfile) from bootstrap.yaml's EnvFile (defaults
-  # to /etc/mseg-tester/.env, written once by cloud-init, 0600, never
+  # to /mseg-tester/.env, written once by cloud-init, 0600, never
   # synced anywhere) or the real process environment. This is what lets
   # config.yaml itself -- which may be fetched from a shared or even
   # public configRepo -- stay free of the actual secret; only the small,

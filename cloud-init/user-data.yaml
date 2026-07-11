@@ -83,7 +83,7 @@ write_files:
   #      on every boot on updateSegment, and changing it is a commit,
   #      not a VM re-provision. Treat configToken with the same care as
   #      any other credential-bearing file.
-  - path: /etc/mseg-tester/bootstrap.yaml
+  - path: /mseg-tester/bootstrap.yaml
     permissions: "0600"
     content: |
       trunkInterface: TRUNK_IFACE
@@ -99,13 +99,14 @@ write_files:
 
   # The plain config.yaml used when configRepo above is left empty (the
   # default/easy path) -- see examples/config.yaml for the same shape
-  # with more commentary. Lives alongside active.yaml/*.result.yaml
-  # (StateDir) rather than under /etc -- it's the one file here that
-  # genuinely changes on its own schedule (self-update/config-sync/report
-  # all touch state on updateSegment), not a static, rarely-changing fact
-  # like bootstrap.yaml. If you DO set configRepo, this file is still
-  # what's used until the first successful sync overwrites it -- harmless
-  # to leave in place either way.
+  # with more commentary. Lives in the same /mseg-tester directory as
+  # bootstrap.yaml/active.yaml/*.result.yaml now -- nothing under /etc at
+  # all -- but remains conceptually distinct: this genuinely changes on
+  # its own schedule (self-update/config-sync/report all touch state on
+  # updateSegment), unlike bootstrap.yaml's static, rarely-changing
+  # facts. If you DO set configRepo, this file is still what's used
+  # until the first successful sync overwrites it -- harmless to leave
+  # in place either way.
   - path: /mseg-tester/config.yaml
     permissions: "0644"
     content: |
@@ -137,7 +138,7 @@ write_files:
           pciVendor: "14c3"   # MediaTek MT7922
           pciDevice: "0616"
           ssid: "${WIFI_128_SSID}"
-          psk: "${WIFI_128_PSK}"   # expanded from /etc/mseg-tester/.env at runtime -- see the EnvFile write_files entry further down
+          psk: "${WIFI_128_PSK}"   # expanded from /mseg-tester/.env at runtime -- see the EnvFile write_files entry further down
           dnsCheck:
             servers: ["system", "192.168.128.5", "fd00:192:168:128::5"]
             tests:
@@ -275,7 +276,7 @@ write_files:
   # config.yaml LOAD time (internal/envfile), not by cloud-init itself, so
   # this file's own "${WIFI_128_SSID}" etc. above stay literal text right
   # up until mseg-tester actually reads config.yaml. Matches
-  # bootstrap.Bootstrap.EnvFile's default path (/etc/mseg-tester/.env) and
+  # bootstrap.Bootstrap.EnvFile's default path (/mseg-tester/.env) and
   # the same mechanism cmd/verify-mseg-tester's own -env-file uses (see
   # internal/verifyvm/user-data.yaml.tmpl) -- this file is the one place
   # that path has to be provisioned by hand instead, since there's no
@@ -286,7 +287,7 @@ write_files:
   # TRUNK_IFACE above) -- these placeholders will NOT resolve on their
   # own. 0600, never synced anywhere, same trust level as
   # bootstrap.yaml's configToken.
-  - path: /etc/mseg-tester/.env
+  - path: /mseg-tester/.env
     permissions: "0600"
     content: |
       WIFI_128_SSID=REPLACE_ME
@@ -339,7 +340,7 @@ write_files:
         rm -f /tmp/go.tar.gz
       fi
 
-      bootstrap_yaml="/etc/mseg-tester/bootstrap.yaml"
+      bootstrap_yaml="/mseg-tester/bootstrap.yaml"
       software_repo=$(sed -n 's/^softwareRepo: *"\(.*\)"/\1/p' "$bootstrap_yaml")
       software_ref=$(sed -n 's/^softwareRef: *"\(.*\)"/\1/p' "$bootstrap_yaml")
       [ -n "$software_ref" ] || software_ref="latest"

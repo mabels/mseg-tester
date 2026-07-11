@@ -23,15 +23,17 @@ test every cycle, entirely self-contained inside the guest.
 
 ## Two config files, split by how often each changes
 
-- **`/etc/mseg-tester/bootstrap.yaml`** — local, rarely changes, written
+Both live under `/mseg-tester` — nothing this tool touches lives under
+`/etc` at all — but stay conceptually distinct:
+
+- **`/mseg-tester/bootstrap.yaml`** — local, rarely changes, written
   once by cloud-init: which NIC is the trunk, which segment can reach the
   internet (`updateSegment`), where the public software repo is, and
   (optionally) where a private config repo is.
 - **`/mseg-tester/config.yaml`** — the content: segment list, test
-  targets, reboot timing, where to report results. Lives alongside
-  `active.yaml`/`*.result.yaml` rather than under `/etc`, since it's the
-  one file here that genuinely changes on its own schedule. Two ways to
-  get it onto the VM, pick either:
+  targets, reboot timing, where to report results. This is the one file
+  here that genuinely changes on its own schedule. Two ways to get it
+  onto the VM, pick either:
   - **easy (the default)**: cloud-init just writes it directly — no
     repo, no token. Changing it means editing `cloud-init/user-data.yaml`
     and re-provisioning.
@@ -121,7 +123,13 @@ happens, not just the final summary.
    that DNS resolved.
 7. Write the result to `/mseg-tester/<segment>.result.yaml` (overwritten
    each time this segment comes back around — the cycle itself is the
-   time dimension, this file is always "most recent pass").
+   time dimension, this file is always "most recent pass"). Its
+   `version` field is `selfupdate.BuildInfo()`'s version string (a Go
+   module pseudo-version whose last 12 hex characters are the commit
+   this binary was built from, for anything short of a real tagged
+   release) — the same string `mseg-tester version` prints, so any
+   result (including whatever's pushed to `report.url`/`report.influx`)
+   can always be traced back to an exact commit.
 8. **Only if** the segment just tested is `updateSegment`:
    - rebuild itself via `go install` straight from `softwareRepo`'s
      source and replace itself if the result differs (`internal/selfupdate`
@@ -149,6 +157,27 @@ happens, not just the final summary.
    brief `rebootDelay` window before it cycles away again. Once set, the
    box parks on that segment on every subsequent boot (a manual reboot,
    a crash, etc.) until `stopOn` is edited back out or changed.
+
+   If the next segment's interface can't be resolved right now (e.g. a
+   `"wifi"` segment whose passthrough radio failed to probe this boot),
+   that segment is **skipped**, not fatal — a failed
+   `<segment>.result.yaml` (a single `"interface"` check) is recorded for
+   it and the cycle advances to the segment after it instead. Bounded to
+   one full lap of the cycle: if literally every segment fails to
+   resolve, that's surfaced as a real error instead of rebooting forever.
+
+   Netplan itself is written to `/etc/netplan/90-mseg-tester.yaml` (the
+   one file this tool owns there), but `internal/netplan.Write` also
+   keeps a per-segment copy alongside it —
+   `/etc/netplan/90-mseg-tester.yaml.<segment>`, always overwritten with
+   that segment's latest render — and `90-mseg-tester.yaml` itself is a
+   hard link to whichever one is currently active. A debug aid: you can
+   inspect exactly what was last written for any segment (e.g. "what did
+   we generate for 130 three reboots ago") without waiting for it to
+   come back around, or needing the box to still be reachable on that
+   segment. These per-segment files deliberately don't end in `.yaml`
+   themselves, so netplan's own `/etc/netplan/*.yaml` glob never picks
+   them up as live config.
 
 ## Setup
 
@@ -193,7 +222,7 @@ block:
   the repo is public). Treat `configToken` with the same care as any
   other credential-bearing file.
 - If any segment is `type: wifi`, also fill in its real `ssid` and the
-  matching `WIFI_<segment name>_SSID`/`_PSK` pair in the `/etc/mseg-tester/.env`
+  matching `WIFI_<segment name>_SSID`/`_PSK` pair in the `/mseg-tester/.env`
   write_files entry (cloud-init/user-data.yaml ships this pre-wired but
   with `REPLACE_ME` placeholders — they will **not** resolve on their own).
 
@@ -239,11 +268,12 @@ at all.
 | Command | When it runs | What it does |
 |---|---|---|
 | `mseg-tester deploy` | Once, from the cloud-init bootstrap script, after the binary is first downloaded | Copies itself to `/usr/local/bin`, writes and enables the systemd unit (`internal/deploy`) |
-| `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/etc/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
+| `mseg-tester run [--bootstrap path] [--no-reboot] [--verbose]` | Every boot, via the systemd unit | The full cycle described above. `--bootstrap` defaults to `/mseg-tester/bootstrap.yaml`; `--no-reboot` prints the outcome instead of rebooting; `--verbose` logs every step and every check's pass/fail/detail as it happens |
 | `mseg-tester render-netplan -config path -segment name [-trunk-iface name]` | Whenever you want to eyeball a segment's netplan | Prints exactly what `internal/netplan.Write` would install for that segment, from a local `config.yaml` — no VM, no network, no shell-on-the-box needed. Handy when a box is stuck at boot (e.g. `systemd-networkd-wait-online`) and unreachable: run this locally against the same `config.yaml` instead |
 | `mseg-tester find-iface [-mac addr] [-pci-vendor id -pci-device id]` | On the guest, whenever you want to check what a `"wifi"` segment's `mac`/`pciVendor`+`pciDevice` (or auto-discovery, if none of the flags are given) would resolve to right now | Runs the same `internal/ifdiscover` resolution a `"wifi"` segment goes through at boot, and prints the resulting interface name (or the error you'd otherwise only see in a failed cycle's logs) — a fast way to sanity-check a MAC or PCI vendor/device pair against the guest's actual hardware before putting it in `config.yaml` |
+| `mseg-tester version` (`-version`/`--version` also work) | Whenever you SSH/console into a box and want to know which commit it's actually running | Prints `selfupdate.BuildInfo()` — the same commit-identifying version string recorded into every `state.Result` (see `Version` below). For a self-updated binary (`go install module@ref`) this is a Go module pseudo-version whose last 12 hex characters are the git commit it was built from — no `-ldflags` needed, the Go toolchain embeds this automatically |
 
-## `bootstrap.yaml` reference (`/etc/mseg-tester/bootstrap.yaml`)
+## `bootstrap.yaml` reference (`/mseg-tester/bootstrap.yaml`)
 
 | Field | Meaning |
 |---|---|
@@ -257,7 +287,7 @@ at all.
 | `configToken` | Fine-grained GitHub PAT, read-only, scoped to only `configRepo`. Leave empty if `configRepo` is empty or public |
 | `stateDir` | Defaults to `/mseg-tester` |
 | `configLocalPath` | Where `config.yaml` lives — either written directly by cloud-init, or fetched into, depending on `configRepo`. Defaults to `/mseg-tester/config.yaml` |
-| `envFile` | Optional. Path to a simple `KEY=VALUE` `.env` file (`internal/envfile`) used to expand `"${VAR}"` references anywhere in `config.yaml`'s text before it's parsed — see below. Defaults to `/etc/mseg-tester/.env`. Written once by cloud-init, 0600, and — like this file — never synced via `configRepo` |
+| `envFile` | Optional. Path to a simple `KEY=VALUE` `.env` file (`internal/envfile`) used to expand `"${VAR}"` references anywhere in `config.yaml`'s text before it's parsed — see below. Defaults to `/mseg-tester/.env`. Written once by cloud-init, 0600, and — like this file — never synced via `configRepo` |
 
 Which segment (if any) is this trunk's native/untagged VLAN is declared in
 `config.yaml` now, not here — see `segments[].type` below.
@@ -440,7 +470,7 @@ Notes:
   against `-env-file` right now, at create time, before being embedded
   into cloud-init — the file that lands at `/mseg-tester/config.yaml` on
   the VM already has real values in it, it does not depend on
-  `/etc/mseg-tester/.env` existing and being read correctly on first
+  `/mseg-tester/.env` existing and being read correctly on first
   boot before it resolves. Runtime substitution (`internal/envfile`,
   driven by the *deployed* `.env`) still also happens on every
   `mseg-tester run` — this matters for `-config-repo`, where there's no
@@ -472,7 +502,7 @@ Notes:
   `ps` output. The same reasoning applies to `-console-password-file`
   over `-console-password`.
 - `-env-file` deploys a local `.env` file (`KEY=VALUE`, see
-  `internal/envfile`) to `/etc/mseg-tester/.env` on the guest, `0600`.
+  `internal/envfile`) to `/mseg-tester/.env` on the guest, `0600`.
   This is what actually resolves `config.yaml`'s `"${VAR}"` references
   (e.g. `report.influx.token`) at runtime and feeds the `CONSOLE_PASSWORD`
   fallback above — without it, those references are only ever resolved

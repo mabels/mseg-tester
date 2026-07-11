@@ -22,6 +22,7 @@ import (
 
 	"github.com/mabels/mseg-tester/internal/config"
 	"github.com/mabels/mseg-tester/internal/envfile"
+	"github.com/mabels/mseg-tester/internal/selfupdate"
 	"github.com/mabels/mseg-tester/internal/sshrun"
 	"github.com/mabels/mseg-tester/internal/verifyvm"
 )
@@ -38,12 +39,33 @@ func main() {
 		runDestroy(os.Args[2:])
 	case "status":
 		runStatus(os.Args[2:])
+	case "version", "-version", "--version":
+		versionCmd()
 	case "-h", "--help", "help":
 		usage()
 	default:
 		fmt.Fprintf(os.Stderr, "verify-mseg-tester: unknown subcommand %q\n\n", os.Args[1])
 		usage()
 		os.Exit(2)
+	}
+}
+
+// versionCmd prints this executable's own build info -- see
+// selfupdate.BuildInfo's doc comment. Distinct from the VM's own
+// `mseg-tester version` (what commit the deployed/self-updating binary
+// is running) -- this is which commit built THIS local tool.
+func versionCmd() {
+	b := selfupdate.BuildInfo()
+	fmt.Println("verify-mseg-tester", b.Version)
+	if b.Revision != "" {
+		dirty := ""
+		if b.Modified {
+			dirty = " (dirty)"
+		}
+		fmt.Printf("commit %s%s\n", b.Revision, dirty)
+	}
+	if b.Time != "" {
+		fmt.Println("committed", b.Time)
 	}
 }
 
@@ -55,6 +77,7 @@ Usage:
   verify-mseg-tester create  -host <user@proxmox> -vmid <id> [flags...] [-yes]
   verify-mseg-tester destroy -host <user@proxmox> -vmid <id> [-yes]
   verify-mseg-tester status  -host <user@proxmox> -vmid <id>
+  verify-mseg-tester version
 
 Without -yes, create/destroy only print the remote commands they would
 run and never connect to the Proxmox host. Run "verify-mseg-tester create
@@ -99,7 +122,7 @@ func runCreate(args []string) {
 	fs.StringVar(&p.ConfigRef, "config-ref", "main", "branch/tag/commit to fetch config.yaml at")
 	configToken := fs.String("config-token", "", "config-repo's PAT, given directly, if it's private (prefer -config-token-file: this appears in argv/shell history/process list)")
 	configTokenFile := fs.String("config-token-file", "", "path to a local file containing the fine-grained PAT for config-repo, if it's private")
-	envFile := fs.String("env-file", ".env", "path to a local .env file (KEY=VALUE, see internal/envfile) to deploy to /etc/mseg-tester/.env on the guest, 0600 -- this is what lets -config-file's \"${VAR}\" references (e.g. report.influx.token) and a CONSOLE_PASSWORD entry actually resolve/apply, instead of needing a manual copy onto the VM. Defaults to \".env\" in the current directory: read automatically if it exists there, silently skipped if not. Set to \"\" to disable entirely, or point at another path explicitly -- an explicitly-named file that doesn't exist is a hard error (unlike the default), so a typo here is never silently ignored. Never fetched from -config-repo")
+	envFile := fs.String("env-file", ".env", "path to a local .env file (KEY=VALUE, see internal/envfile) to deploy to /mseg-tester/.env on the guest, 0600 -- this is what lets -config-file's \"${VAR}\" references (e.g. report.influx.token) and a CONSOLE_PASSWORD entry actually resolve/apply, instead of needing a manual copy onto the VM. Defaults to \".env\" in the current directory: read automatically if it exists there, silently skipped if not. Set to \"\" to disable entirely, or point at another path explicitly -- an explicitly-named file that doesn't exist is a hard error (unlike the default), so a typo here is never silently ignored. Never fetched from -config-repo")
 	sshKeyFile := fs.String("ssh-key-file", "", "path to a local SSH public key file to authorize for the 'ubuntu' user (recommended, for inspecting the VM)")
 	fs.StringVar(&p.SoftwareRef, "module-ref", "", "git branch/tag/commit the bootstrap script's `go install` (and every later self-update) builds -software-repo from. Defaults to \"latest\" (the newest semver tag). Point at your own branch or a commit SHA to exercise unreleased code -- no GitHub release or build pipeline needed (\"test without gh\")")
 	consolePassword := fs.String("console-password", "", "plaintext password for the 'ubuntu' user, for logging in on Proxmox's serial/VNC console independent of SSH (prefer -console-password-file, or a CONSOLE_PASSWORD entry in -env-file: this flag appears in argv/shell history/process list). Leave everything unset to leave the account password-locked -- SSH via -ssh-key-file is unaffected either way")
@@ -162,7 +185,7 @@ func runCreate(args []string) {
 		// runtime substitution alone wouldn't have caught yet), but the
 		// version actually written to /mseg-tester/config.yaml on the VM
 		// now has real values baked in immediately, rather than depending
-		// on /etc/mseg-tester/.env existing and being read correctly on
+		// on /mseg-tester/.env existing and being read correctly on
 		// first boot before anything (e.g. the very first report push)
 		// needs it resolved.
 		p.ConfigYAML = envfile.Expand(string(b), envVars)

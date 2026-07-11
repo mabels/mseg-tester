@@ -22,6 +22,13 @@
 // VLAN tag, set up once by hand -- see the cloud-init/README notes on
 // that one-time step). One segment, though, may instead be the trunk
 // port's NATIVE/untagged VLAN -- see IfaceName below.
+//
+// Write also keeps a per-segment debug copy alongside path itself -- see
+// Write's own doc comment. Those files are named
+// "90-mseg-tester.yaml.<segment>" (note: NOT ending in ".yaml"),
+// deliberately, so netplan's own "/etc/netplan/*.yaml" glob never picks
+// them up as additional config to merge -- they're inspection-only,
+// never live inputs to `netplan apply`/generate.
 package netplan
 
 import (
@@ -33,7 +40,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const path = "/etc/netplan/90-mseg-tester.yaml"
+// path is the file netplan itself reads for this tool's config. A var,
+// not a const, purely so tests can point it at a temp directory instead
+// of ever touching the real, live path (see netplan_test.go) -- normal
+// callers never need to (and shouldn't) reassign this.
+var path = "/etc/netplan/90-mseg-tester.yaml"
 
 // IfaceName returns the interface Write configures (and the same one
 // internal/checks looks addresses up on) for seg. seg.IfName, if set,
@@ -266,21 +277,53 @@ network:
 	return content
 }
 
+// segPath returns the per-segment netplan file Write always keeps up to
+// date for seg -- see Write's doc comment.
+func segPath(seg config.Segment) string {
+	return path + "." + seg.Name
+}
+
 // Write generates and installs the netplan config for exactly one active
 // segment. Does NOT call `netplan apply` -- this tool's whole model is
 // "write config, then reboot" (see cmd/mseg-tester's run loop), so a live
 // apply here would just be redundant work before the reboot throws it
 // away and re-derives the same state from disk anyway. disableWifiIfaces
 // is passed straight through to Render -- see its doc comment.
+//
+// Writes TWO things, not one: seg's own "90-mseg-tester.yaml.<seg.Name>"
+// (always overwritten with seg's latest render, the same "converge, not
+// accumulate" rule as everywhere else in this project -- NOT a growing
+// history), and path itself ("90-mseg-tester.yaml", the file netplan
+// actually reads) as a hard link to that same per-segment file. A debug
+// aid: every segment that's ever been active keeps its own last-rendered
+// file sitting right next to path, inspectable even once the cycle has
+// moved past it -- e.g. "what did we actually write for segment 130
+// three reboots ago" without waiting for 130 to come back around. The
+// hard link (not a copy) means path and its segment's own file are
+// always byte-identical on disk, with no separate write to keep in sync.
 func Write(trunkInterface string, seg config.Segment, disableWifiIfaces []string) error {
 	content := Render(trunkInterface, seg, disableWifiIfaces)
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("netplan: writing %s: %w", tmp, err)
+	segFile := segPath(seg)
+	segTmp := segFile + ".tmp"
+	if err := os.WriteFile(segTmp, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("netplan: writing %s: %w", segTmp, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("netplan: renaming %s -> %s: %w", tmp, path, err)
+	if err := os.Rename(segTmp, segFile); err != nil {
+		return fmt.Errorf("netplan: renaming %s -> %s: %w", segTmp, segFile, err)
+	}
+
+	// path -- the file netplan itself reads -- becomes a hard link to
+	// segFile, atomically: link a fresh name, then rename it over path
+	// (POSIX rename is atomic, same directory/filesystem), so there's
+	// never a moment path is missing or points at a half-written file.
+	linkTmp := path + ".link-tmp"
+	_ = os.Remove(linkTmp) // stale leftover from an interrupted previous run, if any
+	if err := os.Link(segFile, linkTmp); err != nil {
+		return fmt.Errorf("netplan: linking %s -> %s: %w", linkTmp, segFile, err)
+	}
+	if err := os.Rename(linkTmp, path); err != nil {
+		return fmt.Errorf("netplan: renaming %s -> %s: %w", linkTmp, path, err)
 	}
 	return nil
 }

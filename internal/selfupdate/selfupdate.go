@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 )
 
 // Result reports what happened, for the caller to fold into
@@ -95,24 +96,80 @@ func checkAndApply(modulePath, ref, self string) (Result, error) {
 	return Result{Applied: true}, nil
 }
 
-// CurrentVersion returns a short, content-derived identifier for the
-// currently-running executable (the first 12 hex characters of its
-// SHA-256) -- meaningful even without a semver tag baked in at build
-// time: two builds share a CurrentVersion iff they're byte-identical.
+// Build is a human-identifiable description of the currently-running
+// executable's build -- see BuildInfo.
+type Build struct {
+	// Version is the Go module version debug.ReadBuildInfo() resolved at
+	// build time. For a real tagged release this is that tag; for
+	// anything else (the common case here -- see
+	// bootstrap.Bootstrap.SoftwareRef's doc comment, "latest" resolves
+	// to the newest semver tag but a branch/commit ref doesn't) it's a
+	// pseudo-version of the form "v0.0.0-<timestamp>-<commit>", where
+	// <commit> is the first 12 hex characters of the git commit SHA-1
+	// mseg-tester was built from -- confirmed live: `go install
+	// module@<branch-or-commit>` (exactly what CheckAndApply runs)
+	// embeds this even when fetched purely through the module proxy,
+	// with no local git checkout involved at all, so this works
+	// identically whether Build is read on a dev machine or a VM that
+	// self-updated from source. "(unknown)" if build info isn't
+	// available at all (extremely unlikely for anything built with
+	// go1.18+ in module mode).
+	Version string
+	// Revision is the full 40-character git commit SHA-1, if available
+	// -- only present when the build itself happened inside a git
+	// working tree (a local `go build`/`go install ./...` in this repo),
+	// NOT when installed via `go install module@ref` from the module
+	// proxy (that path has no local .git to read -- Version's pseudo-
+	// version suffix is the only commit info available there). Empty
+	// when not available; check Version instead.
+	Revision string
+	// Modified is true if Revision was read from a git working tree that
+	// had uncommitted changes at build time -- meaningless (always
+	// false) when Revision is empty.
+	Modified bool
+	// Time is the commit time (RFC 3339), if available -- same
+	// availability caveat as Revision.
+	Time string
+}
+
+// BuildInfo reads the currently-running executable's own build info
+// (runtime/debug.ReadBuildInfo) -- no custom -ldflags needed at build
+// time, unlike a typical hand-rolled "-X main.version=..." scheme; the
+// Go toolchain embeds this automatically for any module-mode build.
+func BuildInfo() Build {
+	b := Build{Version: "(unknown)"}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return b
+	}
+	if bi.Main.Version != "" {
+		b.Version = bi.Main.Version
+	}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			b.Revision = s.Value
+		case "vcs.time":
+			b.Time = s.Value
+		case "vcs.modified":
+			b.Modified = s.Value == "true"
+		}
+	}
+	return b
+}
+
+// CurrentVersion returns Version alone -- the identifier recorded into
+// every state.Result (and therefore every push to Report.URL/Influx),
+// so a result can always be traced back to the exact commit mseg-tester
+// was running when it was produced. Replaced an earlier content-hash
+// (SHA-256 of the executable) scheme -- that only ever proved "two
+// builds are/aren't byte-identical", not which commit either one
+// actually was; this is what a person actually wants when comparing
+// results across VMs or across a self-update. Never errors in practice
+// (BuildInfo degrades to "(unknown)" instead) -- the error return stays
+// for interface stability with callers already handling one.
 func CurrentVersion() (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("selfupdate: locating current executable: %w", err)
-	}
-	self, err = filepath.EvalSymlinks(self)
-	if err != nil {
-		return "", fmt.Errorf("selfupdate: resolving %s: %w", self, err)
-	}
-	h, err := fileSHA256(self)
-	if err != nil {
-		return "", fmt.Errorf("selfupdate: hashing %s: %w", self, err)
-	}
-	return h[:12], nil
+	return BuildInfo().Version, nil
 }
 
 func sameContent(a, b string) (bool, error) {
