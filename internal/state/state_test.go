@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSaveLoadActiveRoundTripsStopOn(t *testing.T) {
@@ -34,6 +35,38 @@ func TestSaveActiveOmitsStopOnWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(b), "stopOn") {
 		t.Errorf("expected no stopOn key when StopOn is empty, got:\n%s", b)
+	}
+}
+
+func TestSaveLoadLastWaitRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	want := LastWait{Segment: "129", Ran: time.Now().UTC().Truncate(time.Second)}
+	if err := SaveLastWait(dir, want); err != nil {
+		t.Fatalf("SaveLastWait: %v", err)
+	}
+	got, err := LoadLastWait(dir, "129")
+	if err != nil {
+		t.Fatalf("LoadLastWait: %v", err)
+	}
+	if !got.Ran.Equal(want.Ran) || got.Segment != want.Segment {
+		t.Errorf("LoadLastWait = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadLastWaitMissingFileIsNotExist(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadLastWait(dir, "129"); !os.IsNotExist(err) {
+		t.Errorf("expected os.IsNotExist for a segment with no lastwait file yet, got %v", err)
+	}
+}
+
+func TestSaveLastWaitIsPerSegment(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveLastWait(dir, LastWait{Segment: "129", Ran: time.Now()}); err != nil {
+		t.Fatalf("SaveLastWait(129): %v", err)
+	}
+	if _, err := LoadLastWait(dir, "130"); !os.IsNotExist(err) {
+		t.Errorf("expected segment 130's lastwait to be untouched by saving 129's, got %v", err)
 	}
 }
 

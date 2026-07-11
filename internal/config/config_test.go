@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 const minimalYAML = `
@@ -385,5 +386,83 @@ func TestWifiPCIDevicesEmptyForNonWifiSegments(t *testing.T) {
 	}
 	if got := cfg.WifiPCIDevices(); len(got) != 0 {
 		t.Errorf("WifiPCIDevices = %v, want empty", got)
+	}
+}
+
+func TestWaitDelayOrDefaultNilWaitReturnsTenMinutes(t *testing.T) {
+	var w *Wait
+	if got := w.WaitDelayOrDefault(); got != 10*time.Minute {
+		t.Errorf("WaitDelayOrDefault() on a nil *Wait = %v, want 10m", got)
+	}
+}
+
+func TestWaitDelayOrDefaultEmptyReturnsTenMinutes(t *testing.T) {
+	w := &Wait{On: "129"}
+	if got := w.WaitDelayOrDefault(); got != 10*time.Minute {
+		t.Errorf("WaitDelayOrDefault() with empty WaitDelay = %v, want 10m", got)
+	}
+}
+
+func TestWaitDelayOrDefaultMalformedReturnsTenMinutes(t *testing.T) {
+	w := &Wait{On: "129", WaitDelay: "not-a-duration"}
+	if got := w.WaitDelayOrDefault(); got != 10*time.Minute {
+		t.Errorf("WaitDelayOrDefault() with malformed WaitDelay = %v, want 10m", got)
+	}
+}
+
+func TestWaitDelayOrDefaultParsesExplicitValue(t *testing.T) {
+	w := &Wait{On: "129", WaitDelay: "15m"}
+	if got := w.WaitDelayOrDefault(); got != 15*time.Minute {
+		t.Errorf("WaitDelayOrDefault() = %v, want 15m", got)
+	}
+}
+
+func TestLoadParsesReportWaitSection(t *testing.T) {
+	path := writeTemp(t, minimalYAML+`
+report:
+  wait:
+    on: "129"
+    waitDelay: "15m"
+`)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Report == nil || cfg.Report.Wait == nil {
+		t.Fatalf("expected cfg.Report.Wait to be parsed, got %+v", cfg.Report)
+	}
+	if cfg.Report.Wait.On != "129" {
+		t.Errorf("Report.Wait.On = %q, want %q", cfg.Report.Wait.On, "129")
+	}
+	if cfg.Report.Wait.WaitDelay != "15m" {
+		t.Errorf("Report.Wait.WaitDelay = %q, want %q", cfg.Report.Wait.WaitDelay, "15m")
+	}
+}
+
+func TestLoadWithNoReportSectionLeavesWaitNil(t *testing.T) {
+	path := writeTemp(t, minimalYAML)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Report != nil {
+		t.Errorf("expected cfg.Report to be nil when config.yaml has no report section, got %+v", cfg.Report)
+	}
+}
+
+func TestLoadWithReportButNoWaitSubsectionLeavesItNil(t *testing.T) {
+	path := writeTemp(t, minimalYAML+`
+report:
+  url: "https://example.com/report"
+`)
+	cfg, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Report == nil {
+		t.Fatal("expected cfg.Report to be parsed")
+	}
+	if cfg.Report.Wait != nil {
+		t.Errorf("expected cfg.Report.Wait to be nil when report has no wait subsection, got %+v", cfg.Report.Wait)
 	}
 }

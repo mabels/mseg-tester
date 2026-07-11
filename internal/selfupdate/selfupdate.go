@@ -1,8 +1,14 @@
 // Package selfupdate keeps a local git checkout of this tool's own
 // source up to date and, when its HEAD commit differs from the one the
 // currently-running executable was built from, rebuilds and replaces
-// itself. Only ever called when the active segment is
-// bootstrap.Bootstrap.UpdateSegment -- see cmd/mseg-tester.
+// itself, then re-runs its own "deploy" subcommand so
+// /etc/systemd/system/mseg-tester.service is rewritten from the NEW
+// build too -- a self-update that only swapped the binary but left a
+// stale unit file behind (e.g. still pointing PATH at a Go install
+// method the new build no longer expects) would silently strand
+// already-deployed VMs until someone fixed the unit by hand. Only ever
+// called when the active segment is bootstrap.Bootstrap.UpdateSegment --
+// see cmd/mseg-tester.
 //
 // Deliberately git + `go build`, not `go install <module>@<ref>` (an
 // earlier design this replaced) -- git gives a cheap, local way to
@@ -102,6 +108,28 @@ var goBuild = func(srcDir, out string) error {
 	return nil
 }
 
+// runDeploy re-execs self's own "deploy" subcommand right after
+// replaceSelf has renamed a freshly-built binary over it -- this is what
+// keeps /etc/systemd/system/mseg-tester.service current across a
+// self-update, not just the binary. internal/deploy.Run() is idempotent
+// and always rewrites the unit file from ITS build's own go:embed'd
+// content (see internal/deploy/mseg-tester.service), so any change that
+// shipped in the new commit -- e.g. the PATH gaining /snap/bin once Go
+// moved from a hand-extracted tarball to `snap install go --classic` --
+// takes effect immediately, without waiting for a full VM rebuild or a
+// human hand-editing the unit over SSH. Runs as a fresh subprocess of the
+// NEW binary (not a plain function call into the currently-executing OLD
+// process) specifically so it picks up the NEW build's embedded unit
+// content, not the stale one already loaded into this process's memory.
+var runDeploy = func(self string) error {
+	cmd := exec.Command(self, "deploy")
+	cmd.Env = os.Environ()
+	if o, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("deploy: %w: %s", err, o)
+	}
+	return nil
+}
+
 // CheckAndApply ensures srcDir is a clean checkout of repoURL at ref's
 // current HEAD (cloning it first if srcDir doesn't exist yet -- belt
 // and suspenders alongside cloud-init's own first-boot clone, in case
@@ -171,6 +199,9 @@ func checkAndApply(srcDir, repoURL, ref, self, currentRevision string) (Result, 
 
 	if err := replaceSelf(self, built); err != nil {
 		return Result{}, fmt.Errorf("selfupdate: applying update: %w", err)
+	}
+	if err := runDeploy(self); err != nil {
+		return Result{}, fmt.Errorf("selfupdate: redeploying after update: %w", err)
 	}
 	return Result{Applied: true}, nil
 }

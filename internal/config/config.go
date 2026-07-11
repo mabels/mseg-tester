@@ -220,6 +220,12 @@ type InfluxReport struct {
 // attempted while the active segment is bootstrap.Bootstrap.UpdateSegment
 // (the one segment that can reach anywhere outside the segment being
 // tested), same reachability constraint as self-update and config-sync.
+// Wait lives here, not as a separate top-level config.yaml section,
+// because it's fundamentally about that same segment/reachability
+// constraint -- config-sync, self-update, AND the report push below are
+// all "the updateSegment-only block", and Wait just throttles how often
+// that whole block runs, not reporting specifically. See Wait's doc
+// comment.
 type Report struct {
 	// URL results are POSTed to, as a JSON array of state.Result -- e.g.
 	// any small webhook/collector willing to accept that shape. Optional
@@ -228,6 +234,57 @@ type Report struct {
 	URL string `yaml:"url,omitempty"`
 	// Influx is OPTIONAL -- see InfluxReport. Nil skips it.
 	Influx *InfluxReport `yaml:"influx,omitempty"`
+	// Wait is OPTIONAL -- see the Wait type's doc comment. Nil means the
+	// config-sync/self-update/report block runs on every single visit to
+	// its target segment, same as before this existed. Since Report
+	// itself is optional (a nil Config.Report means no reporting is
+	// configured at all), a nil Report also means Wait can never apply --
+	// there'd be nothing throttled work-wise to even name a segment for.
+	Wait *Wait `yaml:"wait,omitempty"`
+}
+
+// Wait optionally throttles how often the expensive updateSegment-only
+// work (config-sync/self-update/report -- see Report and
+// bootstrap.Bootstrap.ConfigRepo/SoftwareRef) actually runs, independent
+// of how often the reboot cycle happens to revisit that segment. Without
+// this, a short RebootDelay elsewhere in the cycle means updateSegment
+// can come back around every few minutes, and every single visit would
+// re-fetch config.yaml, git-fetch+diff this tool's own source, and push
+// a report -- all useful the first time, wasted effort (and GitHub/
+// InfluxDB traffic) repeated seconds after the last one. Segment checks
+// (dhcp/dns/routing/...) and the reboot cycle itself are NEVER throttled
+// by this -- only the config-sync/self-update/report block is.
+type Wait struct {
+	// On is the one segment this throttle applies to -- normally
+	// bootstrap.Bootstrap.UpdateSegment, the only segment the throttled
+	// work ever runs on in the first place, but named explicitly here
+	// (not implied) since Config has no notion of "updateSegment" itself
+	// -- that's a bootstrap.yaml fact, not a config.yaml one. If this
+	// doesn't match the active segment, the throttle simply never
+	// applies (nothing is skipped).
+	On string `yaml:"on"`
+	// WaitDelay is the minimum time that must have elapsed since the
+	// throttled work last actually ran before it's allowed to run again
+	// -- e.g. "10m". Defaults to 10 minutes if empty. A Go duration
+	// string. Independent of RebootDelay (that governs when THIS boot
+	// reboots into the next segment; this governs whether config-sync/
+	// self-update/report happen at all on this particular visit).
+	WaitDelay string `yaml:"waitDelay,omitempty"`
+}
+
+// WaitDelayOrDefault parses WaitDelay, defaulting to 10 minutes for
+// empty, malformed, or non-positive values. Safe to call on a nil *Wait
+// (returns the same default) -- callers still need to check Wait != nil
+// themselves to decide whether the throttle applies at all.
+func (w *Wait) WaitDelayOrDefault() time.Duration {
+	if w == nil || w.WaitDelay == "" {
+		return 10 * time.Minute
+	}
+	d, err := time.ParseDuration(w.WaitDelay)
+	if err != nil || d <= 0 {
+		return 10 * time.Minute
+	}
+	return d
 }
 
 // Config is the content-level configuration fetched from the private repo

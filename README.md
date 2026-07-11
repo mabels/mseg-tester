@@ -130,7 +130,7 @@ happens, not just the final summary.
    release) — the same string `mseg-tester version` prints, so any
    result (including whatever's pushed to `report.url`/`report.influx`)
    can always be traced back to an exact commit.
-8. **Only if** the segment just tested is `updateSegment`:
+8. **Only if** the segment just tested is `updateSegment` **and** `config.yaml`'s optional `report.wait` section isn't currently throttling it (see below):
    - update the local git checkout of `softwareRepo` at
      `internal/selfupdate.DefaultSrcDir` (`/mseg-tester/src`) — clone it
      first if it doesn't exist yet, then always `git fetch`+`git reset
@@ -138,9 +138,15 @@ happens, not just the final summary.
      construction: local state is always discarded, never merged) — and
      only if that HEAD commit differs from the one THIS binary was
      itself built from (`selfupdate.BuildInfo().Revision`) rebuild via
-     `go build` and replace itself (`internal/selfupdate` — no GitHub
-     release, no build pipeline, no asset to keep in sync, no Go module
-     proxy involved at all);
+     `go build`, replace itself, and re-exec its own `mseg-tester deploy`
+     (`internal/selfupdate` — no GitHub release, no build pipeline, no
+     asset to keep in sync, no Go module proxy involved at all). The
+     redeploy step matters as much as the binary swap: `deploy` is what
+     (re)writes `/etc/systemd/system/mseg-tester.service` from that
+     build's own embedded unit file, so anything the new commit changed
+     about how the service runs (e.g. `PATH` gaining `/snap/bin`) takes
+     effect immediately instead of leaving an already-deployed box on a
+     stale unit until it's rebuilt from scratch;
    - if `config.yaml` sets `report.url`, POST every accumulated
      `<segment>.result.yaml` there as JSON (`internal/report.Push`); if it
      sets `report.influx`, write them straight into an InfluxDB v2 bucket
@@ -149,6 +155,23 @@ happens, not just the final summary.
 
    Every other segment skips all of this — there's nothing to reach
    GitHub or the report target(s) through.
+
+   `report.wait.on`/`report.wait.waitDelay` (`internal/config.Wait`)
+   OPTIONALLY throttle this entire block (config-sync too, not just
+   self-update/report — it lives under `report` because it's throttling
+   this whole reachability-constrained block, not reporting specifically,
+   and `report`/`wait` are only ever relevant together on the same
+   segment) to run at most once per `waitDelay`, tracked in a small
+   `<segment>.lastwait.yaml` marker (`internal/state.LastWait`) separate
+   from the per-visit `<segment>.result.yaml` — useful when `rebootDelay`
+   is short enough that `updateSegment` comes back around far more often
+   than is worth re-syncing/re-checking-for-an-update/re-pushing a
+   report. A throttled visit still runs this segment's normal checks and
+   still advances/reboots per `rebootDelay` as usual — only this block is
+   skipped, recorded as its own `"wait"` check (`pass: true`) rather than
+   silently vanishing from the result. No `report` section, or a `report`
+   section with no `wait` subsection, means this block always runs,
+   unthrottled, exactly as before this existed.
 9. **Unless `active.yaml`'s `stopOn` equals the segment just tested**:
    write netplan for the *next* segment in the cycle, advance
    `active.yaml`, sleep `config.yaml`'s `rebootDelay` (if set), and
@@ -320,6 +343,8 @@ handy since `config.yaml` may be fetched from a shared or even public
 | `timezone` | Optional IANA zone name (e.g. `"Europe/Berlin"`), applied via `timedatectl set-timezone` at the start of every run — idempotent, best-effort (an invalid zone is logged, never fatal). Lives in `config.yaml` rather than `bootstrap.yaml` since it's content that can change without re-provisioning the VM. Omit to leave the base image's timezone (normally UTC) untouched |
 | `report.url` | Optional. If set, every accumulated `<segment>.result.yaml` is POSTed here as JSON, only from `updateSegment` |
 | `report.influx` | Optional `{url, org, bucket, token}` — writes the same accumulated results straight into an InfluxDB v2 bucket as line protocol instead (or as well). `token` must be a write-only token scoped to just `bucket`, typically written as `"${INFLUX_TOKEN}"` (see the `"${VAR}"` expansion note above) rather than a literal value — see `internal/report.PushInflux` and `examples/config.yaml` |
+| `report.wait.on` | Optional — the one segment (normally `bootstrap.yaml`'s `updateSegment`) that `report.wait.waitDelay` throttles. Lives under `report`, not its own top-level section, since config-sync/self-update/report are all the same updateSegment-only block and `wait` just throttles how often it runs. If omitted (no `report` section, or `report` with no `wait` subsection), config-sync/self-update/report run on every single visit to that segment, same as before this existed |
+| `report.wait.waitDelay` | Optional Go duration (e.g. `"10m"`), only meaningful alongside `report.wait.on`. The minimum time that must have elapsed since config-sync/self-update/report last actually ran before they're allowed to run again — segment checks and the reboot cycle itself are unaffected either way. Defaults to `"10m"` if `report.wait.on` is set but this is omitted. See `internal/config.Wait` and `internal/state.LastWait` |
 | `segments[].name` | Both the cycle identifier and the VLAN ID |
 | `segments[].type` | `"native"` (this trunk's untagged VLAN — arrives directly on `trunkInterface`, no 802.1Q tag), `"vlan"` (a normal tagged sub-interface), or `"wifi"` (a dedicated Wi-Fi radio passed through to this VM, associating to `ssid`/`psk` instead of riding any VLAN at all). Required on every segment; at most one may be `"native"`. Drives interface naming (`internal/netplan.IfaceName`) and, for `cmd/verify-mseg-tester`, whether `net0` gets `trunks=` at all — the single source of truth for "which segment is native", and (via `Config.VLANSegmentNames`) which segments are VLANs at all, since a `"wifi"` segment's `name` isn't a VLAN ID and must never end up in `trunks=`. If any segment is `"native"`, `net0` is created with **no** `tag=`/`trunks=` whatsoever (see `internal/verifyvm.Params.net0`'s doc comment: on an OVS bridge, Proxmox's `tag=` for a genuinely-untagged VLAN misroutes it — confirmed live) — every VLAN reaches the guest untouched and `internal/netplan.Write` does the demuxing on the guest side. A `"wifi"` segment cycles through `active.yaml`/`rebootDelay`/reporting exactly like any other segment — reassociating over Wi-Fi doesn't need a reboot the way switching VLANs does, but testing it via the same cold-boot cycle as everything else is deliberate, not a limitation. Whichever interface (trunk NIC or Wi-Fi radio) ISN'T this segment's own gets an explicit `activation-mode: off` in the written netplan, not just left out of the file — a passed-through radio's kernel network device exists as soon as its driver binds, independent of netplan entirely, so merely not mentioning it doesn't actually keep it off (confirmed live: this broke `internal/ifaces.Find`'s interface-counting heuristic once passthrough Wi-Fi started working). See `internal/netplan.Render`'s `disableWifiIfaces` doc comment |
 | `segments[].ifname` | For `"native"`/`"vlan"`: optional, overrides the interface name `internal/netplan.IfaceName` would otherwise derive (`trunkInterface` for the native segment, `trunkInterface.<name>` for a tagged one). For `"wifi"`: optional — if set, used literally and takes priority over `mac`/`pciVendor`+`pciDevice`/auto-discovery below. There's no trunk-derived default for a standalone radio, so leave it unset unless you've confirmed the guest names it the same thing on every boot |

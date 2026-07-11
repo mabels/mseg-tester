@@ -34,8 +34,10 @@
 //	                          1. reads which segment is currently active,
 //	                          2. if this IS the update segment (the only
 //	                             one with a route anywhere outside the
-//	                             segment under test), refreshes config.yaml
-//	                             from the private repo (internal/configsync),
+//	                             segment under test) AND config.Wait isn't
+//	                             currently throttling it (see step 6),
+//	                             refreshes config.yaml from the private
+//	                             repo (internal/configsync),
 //	                          3. applies config.Timezone via `timedatectl
 //	                             set-timezone` if set (see applyTimezone)
 //	                             -- best-effort, never fatal,
@@ -46,14 +48,19 @@
 //	                             up to config.CheckAttempts times if any
 //	                             single check in it failed,
 //	                          5. records the result,
-//	                          6. on the update segment: updates its local git
-//	                             checkout (clone if missing, else fetch+reset
-//	                             --hard to softwareRef) and rebuilds+replaces
-//	                             its own executable only if that checkout's
-//	                             HEAD differs from the commit this binary was
-//	                             itself built from (internal/selfupdate),
-//	                             then POSTs every accumulated result to
-//	                             config.Report.URL if set (internal/report),
+//	                          6. on the update segment, UNLESS config.Wait
+//	                             names this segment and its WaitDelay
+//	                             hasn't elapsed since this block last ran
+//	                             (state.LastWait -- recorded as a "wait"
+//	                             check instead when skipped): updates its
+//	                             local git checkout (clone if missing, else
+//	                             fetch+reset --hard to softwareRef) and
+//	                             rebuilds+replaces its own executable only
+//	                             if that checkout's HEAD differs from the
+//	                             commit this binary was itself built from
+//	                             (internal/selfupdate), then POSTs every
+//	                             accumulated result to config.Report.URL if
+//	                             set (internal/report),
 //	                          7. unless active.yaml's StopOn equals the
 //	                             segment just tested (see
 //	                             state.Active.StopOn): writes netplan for
@@ -255,24 +262,6 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		log.Printf("run: active segment=%s firstBoot=%v", active.Segment, firstBoot)
 	}
 
-	// Config-sync (like self-update and reporting below) is only ever
-	// attempted from boot.UpdateSegment -- every other segment has no
-	// route to api.github.com. It's also entirely OPTIONAL: an empty
-	// boot.ConfigRepo means "just use the plain config.yaml cloud-init
-	// already wrote" (see bootstrap.Bootstrap.ConfigRepo's doc comment)
-	// -- the "make it easy first" path with no private repo or token at
-	// all. A failed sync (when ConfigRepo IS set) is not fatal: whatever
-	// config.yaml is already on disk (from a previous successful sync,
-	// or the one cloud-init provisioned) is left in place.
-	if active.Segment == boot.UpdateSegment && boot.ConfigRepo != "" {
-		if verbose {
-			log.Printf("run: syncing config.yaml from %s", boot.ConfigRepo)
-		}
-		if err := configsync.Fetch(boot); err != nil {
-			log.Printf("mseg-tester: config sync: %v", err)
-		}
-	}
-
 	envVars, err := envfile.Load(boot.EnvFile)
 	if err != nil {
 		return fmt.Errorf("loading env file: %w", err)
@@ -281,7 +270,53 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 		log.Printf("run: loaded %d var(s) from %s for \"${VAR}\" expansion in %s", len(envVars), boot.EnvFile, boot.ConfigLocalPath)
 	}
 
+	// Best-effort peek at whatever config.yaml is already on disk (from a
+	// previous sync, or the one cloud-init provisioned, or -- on a first
+	// boot relying purely on ConfigRepo with no static config.yaml at all
+	// -- nothing yet) purely to read Wait, which lives in config.yaml
+	// itself and so can't be known before config-sync without this. Any
+	// failure to load it here (missing file, still-malformed content)
+	// just means "can't tell yet, don't throttle" -- config-sync below
+	// still gets its normal chance to fetch/repair it; the REAL,
+	// authoritative load happens after config-sync, further down.
+	preThrottled := false
+	if precfg, perr := config.Load(boot.ConfigLocalPath, envVars); perr == nil {
+		var terr error
+		preThrottled, terr = updateSegmentThrottled(precfg, boot, active, verbose)
+		if terr != nil {
+			return terr
+		}
+	}
+
+	// Config-sync (like self-update and reporting below) is only ever
+	// attempted from boot.UpdateSegment -- every other segment has no
+	// route to api.github.com. It's also entirely OPTIONAL: an empty
+	// boot.ConfigRepo means "just use the plain config.yaml cloud-init
+	// already wrote" (see bootstrap.Bootstrap.ConfigRepo's doc comment)
+	// -- the "make it easy first" path with no private repo or token at
+	// all. A failed sync (when ConfigRepo IS set) is not fatal: whatever
+	// config.yaml is already on disk (from a previous successful sync,
+	// or the one cloud-init provisioned) is left in place. Skipped
+	// entirely when preThrottled -- see config.Wait's doc comment.
+	if active.Segment == boot.UpdateSegment && boot.ConfigRepo != "" && !preThrottled {
+		if verbose {
+			log.Printf("run: syncing config.yaml from %s", boot.ConfigRepo)
+		}
+		if err := configsync.Fetch(boot); err != nil {
+			log.Printf("mseg-tester: config sync: %v", err)
+		}
+	}
+
 	cfg, err := config.Load(boot.ConfigLocalPath, envVars)
+	if err != nil {
+		return err
+	}
+
+	// The authoritative throttle check, against the just-(possibly-)
+	// synced config.yaml -- Wait itself might be exactly what a sync
+	// just changed, so this can disagree with preThrottled above; this
+	// is the value that actually gates self-update/report below.
+	throttled, err := updateSegmentThrottled(cfg, boot, active, verbose)
 	if err != nil {
 		return err
 	}
@@ -322,14 +357,21 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 	}
 
 	if active.Segment == boot.UpdateSegment {
-		applyUpdateCheck(boot, &result, verbose)
+		if throttled {
+			result.Checks = append(result.Checks, state.CheckResult{
+				Name: "wait", Pass: true,
+				Detail: fmt.Sprintf("waitDelay %s not yet elapsed since the last run -- skipping config-sync/self-update/report this visit", cfg.Report.Wait.WaitDelayOrDefault()),
+			})
+		} else {
+			applyUpdateCheck(boot, &result, verbose)
+		}
 	}
 
 	if err := state.SaveResult(boot.StateDir, result); err != nil {
 		return fmt.Errorf("saving result: %w", err)
 	}
 
-	if active.Segment == boot.UpdateSegment && cfg.Report != nil {
+	if active.Segment == boot.UpdateSegment && !throttled && cfg.Report != nil {
 		if cfg.Report.URL != "" {
 			if verbose {
 				log.Printf("run: pushing accumulated results to %s", cfg.Report.URL)
@@ -346,6 +388,17 @@ func run(bootstrapPath string, noReboot, verbose bool) error {
 			if err := report.PushInflux(*cfg.Report.Influx, boot.StateDir); err != nil {
 				log.Printf("mseg-tester: influx report push: %v", err)
 			}
+		}
+	}
+
+	// Record that the throttled work just ran, so the NEXT visit to this
+	// segment knows when its waitDelay window started -- only when Wait
+	// actually applies here (nothing to track otherwise), and only on
+	// the branch that actually did the work (throttled visits must never
+	// reset the clock they're waiting on).
+	if active.Segment == boot.UpdateSegment && !throttled && cfg.Report != nil && cfg.Report.Wait != nil && cfg.Report.Wait.On == active.Segment {
+		if err := state.SaveLastWait(boot.StateDir, state.LastWait{Segment: active.Segment, Ran: time.Now().UTC()}); err != nil {
+			log.Printf("mseg-tester: saving last-wait state: %v", err)
 		}
 	}
 
@@ -541,6 +594,37 @@ func applyTimezone(tz string, verbose bool) {
 	if out, err := exec.Command("timedatectl", "set-timezone", tz).CombinedOutput(); err != nil {
 		log.Printf("mseg-tester: setting timezone to %q: %v: %s", tz, err, strings.TrimSpace(string(out)))
 	}
+}
+
+// updateSegmentThrottled reports whether cfg.Report.Wait applies to
+// active's segment and, if so, whether WaitDelay hasn't elapsed yet since
+// the last time the throttled work (config-sync/self-update/report)
+// actually ran there -- see config.Wait's doc comment. false whenever
+// Report or Report.Wait is nil, Wait doesn't name this segment, this
+// isn't boot.UpdateSegment, or the throttled work has never run here
+// before (state.LoadLastWait finds no marker) -- only a genuine I/O error
+// reading that marker (NOT "doesn't exist yet") is returned as an error.
+func updateSegmentThrottled(cfg config.Config, boot bootstrap.Bootstrap, active state.Active, verbose bool) (bool, error) {
+	if active.Segment != boot.UpdateSegment || cfg.Report == nil || cfg.Report.Wait == nil || cfg.Report.Wait.On != active.Segment {
+		return false, nil
+	}
+	lw, err := state.LoadLastWait(boot.StateDir, active.Segment)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("loading last-wait state for %s: %w", active.Segment, err)
+	}
+	delay := cfg.Report.Wait.WaitDelayOrDefault()
+	elapsed := time.Since(lw.Ran)
+	if elapsed >= delay {
+		return false, nil
+	}
+	if verbose {
+		log.Printf("run: waitDelay %s not yet elapsed since %s ran at %s (%s ago) -- throttling config-sync/self-update/report this visit",
+			delay, active.Segment, lw.Ran, elapsed.Round(time.Second))
+	}
+	return true, nil
 }
 
 // applyUpdateCheck is only ever called when the active segment IS

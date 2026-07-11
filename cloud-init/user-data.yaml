@@ -114,6 +114,19 @@ write_files:
       rebootDelay: "6m"
       checkAttempts: 3
       checkRetryDelay: "10s"
+
+      # report.url/report.influx are left unset here (no push configured
+      # for this default static config) -- report exists at all purely to
+      # host wait below. Throttles config-sync/self-update/report (all
+      # only ever attempted on updateSegment) to run at most once per
+      # waitDelay, no matter how often the cycle happens to revisit "on"
+      # -- see internal/config.Wait. Segment checks and rebootDelay above
+      # are unaffected either way; this only gates that one block.
+      report:
+        wait:
+          on: "129"        # must match updateSegment above
+          waitDelay: "10m"
+
       segments:
         - name: "128"
           type: native   # arrives UNTAGGED on TRUNK_IFACE itself -- not a VLAN sub-interface

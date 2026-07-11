@@ -12,21 +12,24 @@ import (
 // to some HEAD" -> "built" without a real git binary, network, or Go
 // toolchain.
 type fakeGitState struct {
-	cloned     bool
-	clonedFrom string
-	head       string // what gitFetchReset/gitRevParseHEAD report after being called
-	built      []byte // content goBuild "produces"
+	cloned       bool
+	clonedFrom   string
+	head         string // what gitFetchReset/gitRevParseHEAD report after being called
+	built        []byte // content goBuild "produces"
+	deployed     bool   // set by the faked runDeploy
+	deployedSelf string // self path runDeploy was called with
 }
 
 // withFakeGitAndBuild replaces gitClone/gitFetchReset/gitRevParseHEAD/
-// goBuild for the duration of one test, backed by fs (a real temp dir
-// standing in for srcDir -- gitClone/gitFetchReset just touch a marker
-// file there so os.Stat(filepath.Join(srcDir, ".git")) behaves
+// goBuild/runDeploy for the duration of one test, backed by fs (a real
+// temp dir standing in for srcDir -- gitClone/gitFetchReset just touch a
+// marker file there so os.Stat(filepath.Join(srcDir, ".git")) behaves
 // correctly for checkAndApply's own "does the checkout already exist"
-// check).
+// check). runDeploy is faked too since a real one would try to exec the
+// fake "self" file as a subprocess.
 func withFakeGitAndBuild(t *testing.T, st *fakeGitState) {
 	t.Helper()
-	origClone, origFetch, origRev, origBuild := gitClone, gitFetchReset, gitRevParseHEAD, goBuild
+	origClone, origFetch, origRev, origBuild, origDeploy := gitClone, gitFetchReset, gitRevParseHEAD, goBuild, runDeploy
 
 	gitClone = func(repoURL, dir string) error {
 		st.cloned = true
@@ -48,9 +51,14 @@ func withFakeGitAndBuild(t *testing.T, st *fakeGitState) {
 	goBuild = func(srcDir, out string) error {
 		return os.WriteFile(out, st.built, 0o755)
 	}
+	runDeploy = func(self string) error {
+		st.deployed = true
+		st.deployedSelf = self
+		return nil
+	}
 
 	t.Cleanup(func() {
-		gitClone, gitFetchReset, gitRevParseHEAD, goBuild = origClone, origFetch, origRev, origBuild
+		gitClone, gitFetchReset, gitRevParseHEAD, goBuild, runDeploy = origClone, origFetch, origRev, origBuild, origDeploy
 	})
 }
 
@@ -112,6 +120,41 @@ func TestCheckAndApplyDifferentHeadRebuildsAndReplacesSelf(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Error("expected self to remain executable after replacement")
+	}
+	if !st.deployed {
+		t.Error("expected runDeploy to be called after a successful update, so the systemd unit gets refreshed from the new build too")
+	}
+	if st.deployedSelf != self {
+		t.Errorf("runDeploy called with self=%q, want %q", st.deployedSelf, self)
+	}
+}
+
+func TestCheckAndApplyNoopDoesNotRedeploy(t *testing.T) {
+	// No update needed -- redeploying here would just be pointless extra
+	// work (systemctl daemon-reload etc.) on every single cycle instead
+	// of only when something actually changed.
+	self := writeSelf(t, []byte("running binary bytes"))
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "abc123", built: []byte("would-be-new-bytes")}
+	withFakeGitAndBuild(t, st)
+
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, "abc123"); err != nil {
+		t.Fatalf("checkAndApply: %v", err)
+	}
+	if st.deployed {
+		t.Error("expected runDeploy NOT to be called when no update was applied")
+	}
+}
+
+func TestCheckAndApplyRedeployFailureIsAnError(t *testing.T) {
+	self := writeSelf(t, []byte("old bytes"))
+	srcDir := filepath.Join(t.TempDir(), "src")
+	st := &fakeGitState{head: "def456", built: []byte("new bytes")}
+	withFakeGitAndBuild(t, st)
+	runDeploy = func(self string) error { return fmt.Errorf("systemctl not found") }
+
+	if _, err := checkAndApply(srcDir, "https://github.com/mabels/mseg-tester.git", "main", self, "abc123"); err == nil {
+		t.Error("expected an error when runDeploy fails")
 	}
 }
 

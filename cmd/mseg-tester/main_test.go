@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mabels/mseg-tester/internal/bootstrap"
 	"github.com/mabels/mseg-tester/internal/config"
@@ -116,5 +117,113 @@ func TestAdvanceToResolvableUnknownSegmentIsFatal(t *testing.T) {
 	_, _, err := advanceToResolvable(cfg, boot, active, false)
 	if err == nil {
 		t.Fatalf("expected an error for a cycle entry not declared in config.yaml")
+	}
+}
+
+func TestUpdateSegmentThrottledFalseWhenReportIsNil(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{}
+	active := state.Active{Segment: boot.UpdateSegment}
+
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if throttled {
+		t.Error("expected false when Report (and therefore Report.Wait) is nil")
+	}
+}
+
+func TestUpdateSegmentThrottledFalseWhenReportWaitIsNil(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{Report: &config.Report{URL: "https://example.com/report"}}
+	active := state.Active{Segment: boot.UpdateSegment}
+
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if throttled {
+		t.Error("expected false when Report is set but Report.Wait is nil")
+	}
+}
+
+func TestUpdateSegmentThrottledFalseWhenNotUpdateSegment(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
+	active := state.Active{Segment: "128"} // not boot.UpdateSegment
+
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if throttled {
+		t.Error("expected false when the active segment isn't boot.UpdateSegment")
+	}
+}
+
+func TestUpdateSegmentThrottledFalseWhenWaitOnNamesADifferentSegment(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: "130", WaitDelay: "10m"}}} // not boot.UpdateSegment ("129")
+	active := state.Active{Segment: boot.UpdateSegment}
+
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if throttled {
+		t.Error("expected false when Wait.On names a different segment")
+	}
+}
+
+func TestUpdateSegmentThrottledFalseWhenNoPriorLastWait(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
+	active := state.Active{Segment: boot.UpdateSegment}
+
+	// No state.SaveLastWait call at all -- first time this segment's
+	// throttled work would ever run.
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if throttled {
+		t.Error("expected false when the throttled work has never run on this segment before")
+	}
+}
+
+func TestUpdateSegmentThrottledTrueWithinWaitDelay(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
+	active := state.Active{Segment: boot.UpdateSegment}
+
+	if err := state.SaveLastWait(boot.StateDir, state.LastWait{Segment: boot.UpdateSegment, Ran: time.Now().Add(-1 * time.Minute)}); err != nil {
+		t.Fatalf("SaveLastWait: %v", err)
+	}
+
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if !throttled {
+		t.Error("expected true when less than waitDelay has elapsed since the last run")
+	}
+}
+
+func TestUpdateSegmentThrottledFalseAfterWaitDelayElapses(t *testing.T) {
+	boot := testBootstrap(t)
+	cfg := config.Config{Report: &config.Report{Wait: &config.Wait{On: boot.UpdateSegment, WaitDelay: "10m"}}}
+	active := state.Active{Segment: boot.UpdateSegment}
+
+	if err := state.SaveLastWait(boot.StateDir, state.LastWait{Segment: boot.UpdateSegment, Ran: time.Now().Add(-11 * time.Minute)}); err != nil {
+		t.Fatalf("SaveLastWait: %v", err)
+	}
+
+	throttled, err := updateSegmentThrottled(cfg, boot, active, false)
+	if err != nil {
+		t.Fatalf("updateSegmentThrottled: %v", err)
+	}
+	if throttled {
+		t.Error("expected false once waitDelay has elapsed since the last run")
 	}
 }
