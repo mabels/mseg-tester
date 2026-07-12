@@ -28,6 +28,17 @@ turns into a combinatorial mess that I never once saw solved cleanly. Not by a
 product, not by a script I found online, not by anything. I looked, more than
 once, over the years. Nothing.
 
+This isn't the first piece I've written about this same home network, either.
+The segmented VLAN/Wi-Fi fabric mseg-tester actually cycles through is the one
+[ovn-fabric](https://mabels.github.io/ovn-fabric/blog/ovn-fabric-writeup.html)
+bridges into OVN/OVS in the first place, and the DNS/DHCP side of that same
+network — the part mseg-tester can only ever *test*, not fix — is its own long
+story, told in
+["It's always DNS"](https://mabels.github.io/unified-dns-dhcp-chart/writeups/blog/its-always-dns.html).
+This post picks up where those two leave off: the network exists and DNS/DHCP
+are wired up — now how do you actually *know*, continuously, that they keep
+working.
+
 ## Enter Claude
 
 So this time I actually sat down and started talking through the architecture with
