@@ -573,6 +573,13 @@ Notes:
   anywhere — like `bootstrap.yaml` itself, it's local-only and
   provisioned once, by hand, per VM.
 
+## Write-ups
+
+- [Simple Wishes Are Sometimes Very Complex](https://mabels.github.io/mseg-tester/blog/simple-wishes-are-sometimes-very-complex.html) —
+  the motivation (why autodiscovery testing across VLANs and Wi-Fi never had a
+  clean solution), the reboot-cycling sequencer design, and where building it
+  actually got hard. Source: [docs/blog/simple-wishes-are-sometimes-very-complex.md](docs/blog/simple-wishes-are-sometimes-very-complex.md).
+
 ## License
 
 Apache License 2.0 — see `LICENSE`.

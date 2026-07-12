@@ -1,0 +1,12 @@
+title: mseg-tester
+description: Write-ups on mseg-tester, a reboot-cycling multi-segment/Wi-Fi network autodiscovery tester.
+theme: minima
+
+# Keep default (non-pretty) permalinks: the write-ups embed images with plain
+# relative paths (e.g. diagram.svg next to the .md file). Pretty permalinks
+# would nest the built page in its own directory and break those relative
+# paths.
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
