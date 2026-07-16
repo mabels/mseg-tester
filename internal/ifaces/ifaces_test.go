@@ -191,6 +191,48 @@ func TestFindIgnoresDownWifiRadioOnVLANSegment(t *testing.T) {
 	}
 }
 
+func TestFindIgnoresAdminUpWifiRadioWithNoCarrier(t *testing.T) {
+	// Regression: captured live on a verify-mseg-tester VM after Wi-Fi
+	// passthrough was re-added -- wpa_supplicant brings the radio
+	// administratively UP on its own (to scan) regardless of netplan's
+	// "activation-mode: off", so it shows up in `ip a` as
+	// "<NO-CARRIER,BROADCAST,MULTICAST,UP>": Up is true, but there's no
+	// real link. This used to inflate the non-loopback count on a native
+	// segment (ens18 + wlp1s0 = 2, tripping the "expected 1 or 2, treat
+	// as ambiguous" heuristic incorrectly) and broke dhcp/dhcp6 checks.
+	// Find must also require LowerUp, not just Up, to ignore it.
+	transcript := nativeSegmentTranscript + `4: wlp1s0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN group default qlen 1000
+    link/ether 90:7a:be:dc:34:a9 brd ff:ff:ff:ff:ff:ff
+    altname wlx907abedc34a9
+`
+	list, err := Parse(transcript)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	byName := map[string]Iface{}
+	for _, f := range list {
+		byName[f.Name] = f
+	}
+	radio, ok := byName["wlp1s0"]
+	if !ok {
+		t.Fatal("expected \"wlp1s0\" to be parsed")
+	}
+	if !radio.Up {
+		t.Error("expected wlp1s0 to have the admin Up flag set (that's the whole point of this regression)")
+	}
+	if radio.LowerUp {
+		t.Error("expected wlp1s0 to NOT have LowerUp set (NO-CARRIER)")
+	}
+
+	iface, err := Find(list, config.Segment{Name: "128", Type: "native"})
+	if err != nil {
+		t.Fatalf("Find: %v (an admin-UP-but-NO-CARRIER wifi radio should be ignored, not counted as a second non-loopback interface)", err)
+	}
+	if iface.Name != "ens18" {
+		t.Errorf("Find() = %q, want \"ens18\"", iface.Name)
+	}
+}
+
 func TestFindAmbiguousTopology(t *testing.T) {
 	// Three non-loopback interfaces shouldn't happen in practice (netplan.Write
 	// never brings up more than trunk + one VLAN sub-interface), but Find should

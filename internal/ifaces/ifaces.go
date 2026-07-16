@@ -13,14 +13,24 @@
 // -- only when the active segment is a tagged VLAN, not the trunk's
 // native/untagged one -- exactly one "<trunk>.<segment>@<trunk>" VLAN
 // sub-interface. That small, fixed universe is what Find below relies on:
-// "whichever non-loopback, UP interface is actually the right one" can be
-// determined without matching any name at all, in either topology -- see
-// Find's doc comment. "UP" matters, not just "non-loopback": a
+// "whichever non-loopback, genuinely-carrying-traffic interface is
+// actually the right one" can be determined without matching any name at
+// all, in either topology -- see Find's doc comment.
+//
+// Neither "non-loopback" nor the admin "UP" flag alone is enough: a
 // passed-through Wi-Fi radio's kernel network device can exist on a
 // non-"wifi" segment's boot too (its driver binds independent of
-// netplan), so Find deliberately ignores anything not UP -- see Find's
-// doc comment and internal/netplan.Render's "activation-mode: off"
-// stanzas, which are what keeps it that way.
+// netplan), and internal/netplan.Render's "activation-mode: off" stanza
+// is what's SUPPOSED to keep it administratively down there -- but
+// confirmed live, that's not airtight: wpa_supplicant (installed and
+// enabled by cloud-init so "wifi" segments can actually associate) brings
+// a radio admin-UP on its own, just to scan, independent of netplan's
+// wishes -- observed as `<NO-CARRIER,BROADCAST,MULTICAST,UP>` in `ip a`,
+// admin "UP" present but never associated. So Find checks LOWER_UP too
+// (real link/carrier), not just "UP" -- an interface with admin-UP but no
+// carrier is exactly as irrelevant here as one that's fully down, and
+// LOWER_UP is the one flag wpa_supplicant's background scanning can't
+// fake without an actual association.
 package ifaces
 
 import (
@@ -41,10 +51,11 @@ type Addr struct {
 
 // Iface is one interface block from `ip a`.
 type Iface struct {
-	Name   string // e.g. "ens18.129" -- the "@parent" suffix, if any, is split into Parent below
-	Parent string // e.g. "ens18" -- empty unless this is a VLAN sub-interface riding on another
-	Up     bool   // true if "UP" appears in the interface's <FLAGS> list
-	Addrs  []Addr
+	Name    string // e.g. "ens18.129" -- the "@parent" suffix, if any, is split into Parent below
+	Parent  string // e.g. "ens18" -- empty unless this is a VLAN sub-interface riding on another
+	Up      bool   // true if "UP" appears in the interface's <FLAGS> list -- administrative state only, see LowerUp
+	LowerUp bool   // true if "LOWER_UP" appears in the interface's <FLAGS> list -- real link/carrier present, not just admin-enabled; see Find's doc comment for why this matters separately from Up
+	Addrs   []Addr
 }
 
 // List runs `ip a` and parses its output.
@@ -85,14 +96,16 @@ func Parse(output string) ([]Iface, error) {
 	for _, line := range strings.Split(output, "\n") {
 		if m := headerRE.FindStringSubmatch(line); m != nil {
 			flush()
-			up := false
+			up, lowerUp := false, false
 			for _, f := range strings.Split(m[3], ",") {
-				if f == "UP" {
+				switch f {
+				case "UP":
 					up = true
-					break
+				case "LOWER_UP":
+					lowerUp = true
 				}
 			}
-			cur = &Iface{Name: m[1], Parent: m[2], Up: up}
+			cur = &Iface{Name: m[1], Parent: m[2], Up: up, LowerUp: lowerUp}
 			continue
 		}
 		if cur == nil {
@@ -129,19 +142,29 @@ func Parse(output string) ([]Iface, error) {
 // that's actually carrying seg's traffic -- identified by having a
 // Parent at all, not by matching any particular name).
 //
-// Only UP interfaces count toward that fixed universe -- deliberately,
-// not an oversight: a PCI-passthrough Wi-Fi radio's kernel network
-// device exists (and shows up in `ip a`/List) as soon as its driver
-// binds, entirely independent of whether netplan/wpa_supplicant ever
-// associates it. internal/netplan.Render now explicitly forces that
+// Only UP-AND-LOWER_UP interfaces count toward that fixed universe --
+// deliberately, not an oversight: a PCI-passthrough Wi-Fi radio's kernel
+// network device exists (and shows up in `ip a`/List) as soon as its
+// driver binds, entirely independent of whether netplan/wpa_supplicant
+// ever associates it. internal/netplan.Render explicitly forces that
 // radio administratively DOWN ("activation-mode: off") on every segment
-// that isn't itself a "wifi" segment, specifically so it's excluded
-// here rather than silently inflating this count -- confirmed live as a
-// real breakage once passthrough Wi-Fi actually started working for the
-// first time: a native segment saw 2 non-loopback interfaces instead of
-// 1 (trunk + idle radio) and a tagged VLAN segment saw 3 instead of 2,
-// both hitting this function's error paths below even though the
-// segment's own traffic was working fine.
+// that isn't itself a "wifi" segment, specifically so it's excluded here
+// rather than silently inflating this count -- confirmed live as a real
+// breakage once passthrough Wi-Fi actually started working for the first
+// time: a native segment saw 2 non-loopback interfaces instead of 1
+// (trunk + idle radio) and a tagged VLAN segment saw 3 instead of 2, both
+// hitting this function's error paths below even though the segment's
+// own traffic was working fine.
+//
+// Admin UP alone turned out not to be enough, though -- also confirmed
+// live: wpa_supplicant (running so "wifi" segments can actually
+// associate) brings the radio administratively UP on its own, just to
+// scan, regardless of netplan's "activation-mode: off". `ip a` then shows
+// that radio as e.g. `<NO-CARRIER,BROADCAST,MULTICAST,UP>` -- UP present,
+// but genuinely idle. LOWER_UP (real link/carrier, set only once
+// something is actually plugged in or associated) is the flag
+// wpa_supplicant's background scanning can't produce on its own, so both
+// are required here.
 func Find(list []Iface, seg config.Segment) (Iface, error) {
 	if seg.IfName != "" {
 		for _, f := range list {
@@ -154,7 +177,7 @@ func Find(list []Iface, seg config.Segment) (Iface, error) {
 
 	var nonLo []Iface
 	for _, f := range list {
-		if f.Name == "lo" || !f.Up {
+		if f.Name == "lo" || !f.Up || !f.LowerUp {
 			continue
 		}
 		nonLo = append(nonLo, f)
